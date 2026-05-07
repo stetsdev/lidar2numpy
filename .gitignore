@@ -1,6 +1,9 @@
 # PCD file
 *.pcd
 
+# LiDAR capture files — large binary fixtures, kept locally only
+*.pcap
+
 # version control
 _version.py
 
