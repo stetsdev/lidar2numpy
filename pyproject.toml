@@ -1,72 +1,48 @@
 [project]
-name = "hydra4"
-dynamic = ["version"]
-description = "Decode Hesai Pandar Packets to NumPy arrays or PointCloud2 messages"
-authors = [{ name = "urasakikeisuke", email = "keisuke.urasaki@map4.jp" }]
+name = "lidar2numpy"
+version = "0.1.0"
+description = "Decode Hesai JT128 LiDAR UDP packets into structured NumPy arrays"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE.txt" }
 dependencies = [
     "numpy>=1.22.0",
-    "pypcd4>=1.0.0",
 ]
-readme = "README.md"
-requires-python = ">=3.10"
-license = { file = "LICENSE.txt" }
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Scientific/Engineering",
     "Topic :: Software Development :: Libraries",
     "Topic :: System :: Hardware :: Hardware Drivers",
-    "Topic :: Utilities",
-    "Framework :: Robot Framework :: Tool",
 ]
 urls.Source = "https://github.com/MapIV/hydra4"
-urls.Tracker = "https://github.com/MapIV/hydra4/issues"
-urls."Release Notes" = "https://github.com/MapIV/hydra4/releases"
 
 [dependency-groups]
 dev = [
-    "rosbags>=0.10.0",
     "pytest>=8.2.0",
-    "ruff>=0.4.3",
     "pytest-cov>=5.0.0",
-    "ty>=0.0.29",
-    "setuptools-scm>=8.0.4",
-    "tox>=4.15.0",
+    "ruff>=0.4.3",
+    "mypy>=1.0",
 ]
 
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch]
-version.source = "vcs"
-build.hooks.vcs.version-file = "src/hydra4/_version.py"
-
-[tool.hatch.version.raw-options]
-local_scheme = "no-local-version"
+[tool.hatch.build.targets.wheel]
+packages = ["src/lidar2numpy"]
 
 [tool.hatch.build.targets.sdist]
-ignore-vcs = true
 exclude = [
-  "*.pcd",
-  "tests/",
+    "tests/",
+    "docs/",
+    "context/",
 ]
-
-[tool.setuptools_scm]
-write_to = "src/hydra4/_version.py"
-version_scheme = "guess-next-dev"
-local_scheme = "node-and-date"
 
 [tool.ruff]
 line-length = 100
@@ -78,35 +54,15 @@ ignore = ["PLR2004"]
 fixable = ["ALL"]
 unfixable = []
 
-[tool.ruff.lint.per-file-ignores]
-# Packet decoders have inherent statement/branch complexity
-"src/hydra4/decoders/pandar_ot128.py" = ["PLR0912", "PLR0915"]
-"src/hydra4/decoders/pandar_xt32.py" = ["PLR0912"]
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
 docstring-code-line-length = 60
 
-[tool.tox]
-legacy_tox_ini = """
-    [tox]
-    min_version = 4.0
-    isolated_build = true
-    env_list =
-        py310
-        py311
-        py312
-        py313
+[tool.mypy]
+strict = true
+files = ["src"]
 
-    [testenv]
-    deps =
-        pytest
-        pytest-cov
-        ruff
-        rosbags
-    commands =
-        ruff check src tests
-        pytest tests -vv
-"""
+[tool.pytest.ini_options]
+testpaths = ["tests"]
