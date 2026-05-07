@@ -59,6 +59,4 @@ class TestFiringOffsetsSeconds:
 
     def test_values_match_us_table_converted(self) -> None:
         for ch in range(1, 129):
-            assert FIRING_OFFSETS_S[ch - 1] == pytest.approx(
-                FIRING_TIME_OFFSETS_US[ch] * 1e-6
-            )
+            assert FIRING_OFFSETS_S[ch - 1] == pytest.approx(FIRING_TIME_OFFSETS_US[ch] * 1e-6)
