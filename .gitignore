@@ -79,3 +79,5 @@ dmypy.json
 
 # Claude
 .claude/
+*.mcap
+context/
