@@ -4,6 +4,10 @@ import numpy as np
 import pytest
 
 from lidar2numpy.structs import (
+    _TAIL_OFF_DATETIME,
+    _TAIL_OFF_FRAC_SEC,
+    _TAIL_OFF_MOTOR_SPEED,
+    _TAIL_OFF_RETURN_MODE,
     BLOCK1_START_US,
     BLOCK2_START_US,
     BODY_SIZE,
@@ -18,10 +22,6 @@ from lidar2numpy.structs import (
     TAIL_SIZE,
     UDP_PAYLOAD_SIZE,
     ReturnMode,
-    _TAIL_OFF_DATETIME,
-    _TAIL_OFF_FRAC_SEC,
-    _TAIL_OFF_MOTOR_SPEED,
-    _TAIL_OFF_RETURN_MODE,
 )
 
 
