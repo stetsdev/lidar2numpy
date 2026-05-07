@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 import numpy as np
 import pytest
 from _packet_builder import build_packet
-from lidar2numpy.decoder import block1_azimuth, decode_packet
 
 from lidar2numpy.calibration import Calibration
+from lidar2numpy.decoder import block1_azimuth, decode_packet
 from lidar2numpy.firing_times import FIRING_OFFSETS_S
 from lidar2numpy.structs import BLOCK1_START_US, BLOCK2_START_US, POINT_DTYPE
 
@@ -72,7 +72,7 @@ class TestBlock1Azimuth:
 class TestValidationErrors:
     def test_wrong_length_raises(self) -> None:
         with pytest.raises(ValueError, match="1100"):
-            decode_packet(b"\xee\xff" + b"\x00" * 1098, _flat_cal())
+            decode_packet(b"\x00" * 1099, _flat_cal())
 
     def test_bad_sop_raises(self) -> None:
         pkt = bytearray(build_packet())
@@ -337,7 +337,8 @@ class TestTimestamp:
         # block1 fires earlier (BLOCK1_START_US < BLOCK2_START_US)
         delta = ts_sorted[1] - ts_sorted[0]
         expected_delta = (BLOCK2_START_US - BLOCK1_START_US) * 1e-6
-        assert delta == pytest.approx(expected_delta, rel=1e-6)
+        # float64 at ~1.746e9 epoch has ~400 ns ULP; allow 1 µs tolerance
+        assert delta == pytest.approx(expected_delta, abs=1e-6)
 
     def test_timestamp_dtype_is_float64(self) -> None:
         pkt = build_packet(block1_channels={0: (250, 100, 0)})
