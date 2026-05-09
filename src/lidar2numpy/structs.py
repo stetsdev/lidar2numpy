@@ -75,3 +75,20 @@ POINT_DTYPE: np.dtype[np.void] = np.dtype(
         ("noise_level", np.uint8),
     ]
 )
+
+# Spherical (polar) output dtype — emitted when output_mode="spherical".
+# Stops the decode pipeline before the trig XYZ step, giving callers the
+# native sensor coordinates for range-image processing (background subtraction
+# etc.) before committing to the more expensive Cartesian conversion.
+# channel is 1-based (1–128) to match the ring field in POINT_DTYPE.
+SPHERICAL_DTYPE: np.dtype[np.void] = np.dtype(
+    [
+        ("channel", np.uint8),
+        ("azimuth_deg", np.float32),  # calibration-corrected, degrees
+        ("distance_m", np.float32),  # metres
+        ("intensity", np.float32),
+        ("timestamp", np.float64),
+        ("contamination", np.uint8),
+        ("noise_level", np.uint8),
+    ]
+)
