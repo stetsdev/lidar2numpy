@@ -1,6 +1,6 @@
 """JT128 single-packet decoder.
 
-Two public functions:
+Public functions:
 
 - ``decode_packet(payload, calibration) -> np.ndarray``
       Parse one 1100-byte UDP payload into a POINT_DTYPE structured array.
@@ -11,6 +11,10 @@ Two public functions:
       Cheap 2-byte read of Block 1's raw azimuth (uint16, unit 0.01°).
       Called by Decoder.feed after decode_packet to give the azimuth value
       to FrameAssembler without a second full decode.
+
+- ``to_cartesian(spherical, calibration) -> np.ndarray``
+      Convert a SPHERICAL_DTYPE array (or any subset) to POINT_DTYPE by
+      applying the same calibration-aware trig used by decode_packet.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from .structs import (
     DIS_UNIT_M,
     POINT_DTYPE,
     SOP,
+    SPHERICAL_DTYPE,
     ReturnMode,
 )
 
@@ -58,32 +63,11 @@ _BLOCK_CH_OFFSETS: tuple[int, int] = (_BLOCK1_CH_OFFSET, _BLOCK2_CH_OFFSET)
 _BLOCK_START_US: tuple[float, float] = (BLOCK1_START_US, BLOCK2_START_US)
 
 
-def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
-    """Decode one 1100-byte JT128 UDP payload into a POINT_DTYPE array.
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
-    Parameters
-    ----------
-    payload:
-        Raw UDP payload bytes. Must be exactly 1100 bytes.
-    calibration:
-        Per-channel elevation and azimuth-offset angles.
 
-    Returns
-    -------
-    np.ndarray
-        Structured array with dtype POINT_DTYPE. Length = number of channels
-        with distance > 0 across both blocks. May be empty.
-
-    Raises
-    ------
-    ValueError
-        If ``len(payload) != 1100``, SOP bytes are wrong, protocol version is
-        unsupported, or the confidence flag (header bit 5) is not set.
-    NotImplementedError
-        If the Return Mode byte indicates a dual-return mode (codes 0x39,
-        0x3B, 0x3C) — not yet supported.
-    """
-    # ── Validation ───────────────────────────────────────────────────────────
+def _validate_payload(payload: bytes) -> None:
+    """Raise ValueError / NotImplementedError for malformed or unsupported packets."""
     if len(payload) != 1100:
         raise ValueError(f"JT128 payload must be exactly 1100 bytes; got {len(payload)}")
     if payload[0:2] != SOP:
@@ -102,7 +86,12 @@ def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
             "lidar2numpy v0.1 requires 4-byte records with confidence"
         )
 
-    # ── Tail: return mode, timestamp ──────────────────────────────────────────
+
+def _parse_tail(payload: bytes) -> tuple[ReturnMode, float]:
+    """Extract return mode and t0 (Unix epoch seconds) from the tail.
+
+    Must be called after ``_validate_payload``.
+    """
     return_mode_byte: int = payload[_TAIL_OFFSET + _TAIL_OFF_RETURN_MODE]
     try:
         return_mode = ReturnMode(return_mode_byte)
@@ -135,8 +124,63 @@ def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
         frac_us % 1_000_000,
         tzinfo=timezone.utc,
     ).timestamp()
+    return return_mode, t0
 
-    # ── Decode body blocks ────────────────────────────────────────────────────
+
+def _spherical_to_xyz(
+    dist_m: np.ndarray,
+    horiz_rad: np.ndarray,
+    elev_rad: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert polar coordinates to Cartesian XYZ (float64 arrays).
+
+    Single implementation shared by decode_packet and to_cartesian so the
+    two output paths cannot drift apart.
+
+    Coordinate convention (Y = 0° azimuth, clockwise positive):
+        x = dist * cos(elev) * sin(horiz)
+        y = dist * cos(elev) * cos(horiz)
+        z = dist * sin(elev)
+    """
+    cos_elev = np.cos(elev_rad)
+    return (
+        dist_m * cos_elev * np.sin(horiz_rad),
+        dist_m * cos_elev * np.cos(horiz_rad),
+        dist_m * np.sin(elev_rad),
+    )
+
+
+# ── Public decode functions ───────────────────────────────────────────────────
+
+
+def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
+    """Decode one 1100-byte JT128 UDP payload into a POINT_DTYPE array.
+
+    Parameters
+    ----------
+    payload:
+        Raw UDP payload bytes. Must be exactly 1100 bytes.
+    calibration:
+        Per-channel elevation and azimuth-offset angles.
+
+    Returns
+    -------
+    np.ndarray
+        Structured array with dtype POINT_DTYPE. Length = number of channels
+        with distance > 0 across both blocks. May be empty.
+
+    Raises
+    ------
+    ValueError
+        If ``len(payload) != 1100``, SOP bytes are wrong, protocol version is
+        unsupported, or the confidence flag (header bit 5) is not set.
+    NotImplementedError
+        If the Return Mode byte indicates a dual-return mode (codes 0x39,
+        0x3B, 0x3C) — not yet supported.
+    """
+    _validate_payload(payload)
+    _, t0 = _parse_tail(payload)
+
     block_arrays: list[np.ndarray] = []
     for blk in range(2):
         az_raw: int = struct.unpack_from("<H", payload, _BLOCK_AZ_OFFSETS[blk])[0]
@@ -156,10 +200,7 @@ def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
         horiz_rad: np.ndarray = np.deg2rad(horiz_deg)
         elev_rad: np.ndarray = calibration.elevations_rad[ring_0]
 
-        cos_elev: np.ndarray = np.cos(elev_rad)
-        x: np.ndarray = dist_m * cos_elev * np.sin(horiz_rad)
-        y: np.ndarray = dist_m * cos_elev * np.cos(horiz_rad)
-        z: np.ndarray = dist_m * np.sin(elev_rad)
+        x, y, z = _spherical_to_xyz(dist_m, horiz_rad, elev_rad)
 
         block_start_s: float = _BLOCK_START_US[blk] * 1e-6
         timestamps: np.ndarray = t0 + block_start_s + FIRING_OFFSETS_S[ring_0]
@@ -180,6 +221,100 @@ def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
     if not block_arrays:
         return np.empty(0, dtype=POINT_DTYPE)
     return np.concatenate(block_arrays)
+
+
+def _decode_packet_spherical(payload: bytes, calibration: Calibration) -> np.ndarray:
+    """Decode one payload into a SPHERICAL_DTYPE array (no trig conversion).
+
+    Identical pipeline to decode_packet up to — but not including — the XYZ
+    trig step. The azimuth_deg field contains the calibration-corrected azimuth
+    so callers can build consistent per-channel range images without re-applying
+    the per-channel offset.
+
+    Not part of the public API; accessed via Decoder(output_mode="spherical").
+    """
+    _validate_payload(payload)
+    _, t0 = _parse_tail(payload)
+
+    block_arrays: list[np.ndarray] = []
+    for blk in range(2):
+        az_raw: int = struct.unpack_from("<H", payload, _BLOCK_AZ_OFFSETS[blk])[0]
+        channels: np.ndarray = np.frombuffer(
+            payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK_CH_OFFSETS[blk]
+        )
+
+        mask: np.ndarray = channels["distance"] > 0
+        if not np.any(mask):
+            continue
+
+        ring_0: np.ndarray = np.where(mask)[0]  # 0-based ring indices of valid channels
+        valid = channels[mask]
+
+        dist_m: np.ndarray = valid["distance"].astype(np.float64) * DIS_UNIT_M
+        horiz_deg: np.ndarray = az_raw * 0.01 + calibration.azimuth_offsets_deg[ring_0]
+
+        block_start_s: float = _BLOCK_START_US[blk] * 1e-6
+        timestamps: np.ndarray = t0 + block_start_s + FIRING_OFFSETS_S[ring_0]
+
+        n: int = int(np.count_nonzero(mask))
+        arr = np.empty(n, dtype=SPHERICAL_DTYPE)
+        arr["channel"] = (ring_0 + 1).astype(np.uint8)
+        arr["azimuth_deg"] = horiz_deg.astype(np.float32)
+        arr["distance_m"] = dist_m.astype(np.float32)
+        arr["intensity"] = valid["reflectivity"].astype(np.float32)
+        arr["timestamp"] = timestamps
+        arr["contamination"] = (valid["confidence"] >> 6).astype(np.uint8)
+        arr["noise_level"] = (valid["confidence"] & 0x3F).astype(np.uint8)
+
+        block_arrays.append(arr)
+
+    if not block_arrays:
+        return np.empty(0, dtype=SPHERICAL_DTYPE)
+    return np.concatenate(block_arrays)
+
+
+def to_cartesian(spherical: np.ndarray, calibration: Calibration) -> np.ndarray:
+    """Convert a SPHERICAL_DTYPE array to a POINT_DTYPE array.
+
+    Applies the same calibration-aware trig as the cartesian decode path.
+    Accepts any subset of a spherical frame — callers can filter to foreground
+    points first (e.g. background subtraction on the range image) and then
+    convert only the survivors.
+
+    Parameters
+    ----------
+    spherical:
+        Structured array with dtype SPHERICAL_DTYPE. May be a subset/slice of
+        a frame; does not need to represent a complete 360° rotation.
+    calibration:
+        The same Calibration object used to produce the spherical array.
+
+    Returns
+    -------
+    np.ndarray
+        Structured array with dtype POINT_DTYPE containing one row per input
+        point. Fields other than x/y/z are carried over directly from the
+        spherical array (intensity, timestamp, contamination, noise_level).
+        The ring field equals the channel field from the spherical array.
+    """
+    channel_idx = spherical["channel"].astype(np.intp) - 1  # 0-based index into calibration
+    horiz_rad = np.deg2rad(spherical["azimuth_deg"].astype(np.float64))
+    elev_rad = calibration.elevations_rad[channel_idx]
+    dist_m = spherical["distance_m"].astype(np.float64)
+
+    x, y, z = _spherical_to_xyz(dist_m, horiz_rad, elev_rad)
+
+    n = len(spherical)
+    arr = np.empty(n, dtype=POINT_DTYPE)
+    arr["x"] = x.astype(np.float32)
+    arr["y"] = y.astype(np.float32)
+    arr["z"] = z.astype(np.float32)
+    arr["intensity"] = spherical["intensity"]
+    arr["ring"] = spherical["channel"].astype(np.uint16)
+    arr["timestamp"] = spherical["timestamp"]
+    arr["contamination"] = spherical["contamination"]
+    arr["noise_level"] = spherical["noise_level"]
+    return arr
 
 
 def block1_azimuth(payload: bytes) -> int:

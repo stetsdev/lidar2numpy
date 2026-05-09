@@ -37,7 +37,8 @@ class FrameAssembler:
             process(final)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, dtype: np.dtype = POINT_DTYPE) -> None:
+        self._dtype = dtype
         self._last_az: int | None = None
         self._buffered: list[np.ndarray] = []
         self._started: bool = False  # True after the first rollover is observed
@@ -103,8 +104,8 @@ class FrameAssembler:
         return current_az < last_az and (last_az - current_az) > _ROLLOVER_THRESHOLD
 
     def _concat_buffer(self) -> np.ndarray:
-        """Concatenate buffered arrays; return empty POINT_DTYPE array if all empty."""
+        """Concatenate buffered arrays; return empty array of self._dtype if all empty."""
         non_empty = [a for a in self._buffered if len(a) > 0]
         if not non_empty:
-            return np.empty(0, dtype=POINT_DTYPE)
+            return np.empty(0, dtype=self._dtype)
         return np.concatenate(non_empty)
