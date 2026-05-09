@@ -34,6 +34,8 @@ uv sync
 
 ## Usage
 
+### Cartesian (default)
+
 ```python
 from lidar2numpy import Decoder, load_calibration
 
@@ -43,13 +45,39 @@ decoder = Decoder(calibration)
 for payload in udp_payloads:  # 1100-byte bytes objects from socket / pcap
     frame = decoder.feed(payload)
     if frame is not None:
-        # frame is np.ndarray with POINT_DTYPE; one complete 360° rotation
+        # frame is a POINT_DTYPE array (x, y, z, intensity, …)
         ...
 ```
 
+### Spherical → background subtraction → `to_cartesian()`
+
+Decode into the sensor's native polar coordinates first, filter out static
+background on the cheap range-image representation, then convert only the
+surviving foreground points to XYZ:
+
+```python
+from lidar2numpy import Decoder, load_calibration, to_cartesian
+
+cal = load_calibration("angle_corrections.csv")
+decoder = Decoder(cal, output_mode="spherical")
+
+for payload in udp_payloads:
+    frame = decoder.feed(payload)
+    if frame is not None:
+        # frame is a SPHERICAL_DTYPE array (channel, azimuth_deg, distance_m, …)
+        foreground = frame[~background_mask(frame)]  # fast numpy op on polar coords
+        xyz = to_cartesian(foreground, cal)          # trig only on survivors
+        ...
+```
+
+`to_cartesian()` accepts any subset or slice of a spherical frame — it does
+not require a complete 360° rotation.
+
 ## Output Contract
 
-Each emitted frame is a NumPy structured array with dtype:
+Points with no return (raw distance = 0) are excluded from all output arrays.
+
+### `POINT_DTYPE` — cartesian mode (default)
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -62,16 +90,33 @@ Each emitted frame is a NumPy structured array with dtype:
 | `contamination` | uint8 | Lens contamination level 0–3 |
 | `noise_level` | uint8 | Discrete noise likelihood 0–63 |
 
-Points with no return (raw distance = 0) are excluded.
+### `SPHERICAL_DTYPE` — spherical mode
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `channel` | uint8 | Channel number 1–128 |
+| `azimuth_deg` | float32 | Calibration-corrected azimuth, degrees |
+| `distance_m` | float32 | Measured distance, metres |
+| `intensity` | float32 | Reflectivity 0–255 |
+| `timestamp` | float64 | Per-point Unix epoch seconds (LiDAR hardware clock) |
+| `contamination` | uint8 | Lens contamination level 0–3 |
+| `noise_level` | uint8 | Discrete noise likelihood 0–63 |
+
+`azimuth_deg` is already calibration-corrected (per-channel offset applied),
+so it can be used directly to index a range image without re-applying the
+offset. Call `to_cartesian(spherical_array, calibration)` to convert any
+SPHERICAL_DTYPE array — or an arbitrary subset — to POINT_DTYPE. The trig is
+identical to the cartesian decode path; the two outputs are numerically
+equivalent up to float32 precision.
 
 ## Project Structure
 
 ```
 src/lidar2numpy/
 ├── __init__.py            # Public API
-├── decoder.py             # decode_packet(): bytes → POINT_DTYPE array
+├── decoder.py             # decode_packet(), to_cartesian(): bytes → POINT_DTYPE / SPHERICAL_DTYPE
 ├── frame_assembler.py     # FrameAssembler: azimuth-rollover frame detection
-├── structs.py             # POINT_DTYPE, ReturnMode, packet constants
+├── structs.py             # POINT_DTYPE, SPHERICAL_DTYPE, ReturnMode, packet constants
 ├── calibration.py         # load_calibration() / default_calibration()
 ├── firing_times.py        # Per-channel firing-time offset table
 └── calibrations/
