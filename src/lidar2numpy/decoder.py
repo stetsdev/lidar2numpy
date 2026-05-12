@@ -20,6 +20,7 @@ Public functions:
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import numpy as np
@@ -114,6 +115,10 @@ def _parse_tail(payload: bytes) -> tuple[ReturnMode, float]:
         "<6B", payload, _TAIL_OFFSET + _TAIL_OFF_DATETIME
     )
     frac_us: int = struct.unpack_from("<I", payload, _TAIL_OFFSET + _TAIL_OFF_FRAC_SEC)[0]
+    if frac_us >= 1_000_000:
+        raise ValueError(
+            f"Fractional microseconds field is {frac_us}; expected < 1 000 000"
+        )
     t0: float = datetime(
         year_ + 1900,
         month,
@@ -121,7 +126,7 @@ def _parse_tail(payload: bytes) -> tuple[ReturnMode, float]:
         hour,
         minute,
         second,
-        frac_us % 1_000_000,
+        frac_us,
         tzinfo=timezone.utc,
     ).timestamp()
     return return_mode, t0
@@ -148,6 +153,48 @@ def _spherical_to_xyz(
         dist_m * cos_elev * np.cos(horiz_rad),
         dist_m * np.sin(elev_rad),
     )
+
+
+# ── Shared block extraction ──────────────────────────────────────────────────
+
+
+@dataclass
+class _BlockData:
+    """Intermediate per-block arrays shared by both decode paths."""
+
+    ring_0: np.ndarray  # 0-based channel indices of valid returns
+    valid: np.ndarray  # _CHANNEL_DTYPE subset (distance > 0 only)
+    dist_m: np.ndarray  # float64, metres
+    horiz_deg: np.ndarray  # float64, calibration-corrected
+    timestamps: np.ndarray  # float64, Unix epoch
+
+
+def _extract_blocks(
+    payload: bytes, calibration: Calibration, t0: float
+) -> list[_BlockData]:
+    """Parse both blocks from a validated payload into intermediate arrays."""
+    blocks: list[_BlockData] = []
+    for blk in range(2):
+        az_raw: int = struct.unpack_from("<H", payload, _BLOCK_AZ_OFFSETS[blk])[0]
+        channels: np.ndarray = np.frombuffer(
+            payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK_CH_OFFSETS[blk]
+        )
+
+        mask: np.ndarray = channels["distance"] > 0
+        if not np.any(mask):
+            continue
+
+        ring_0: np.ndarray = np.where(mask)[0]
+        valid = channels[mask]
+
+        dist_m: np.ndarray = valid["distance"].astype(np.float64) * DIS_UNIT_M
+        horiz_deg: np.ndarray = az_raw * 0.01 + calibration.azimuth_offsets_deg[ring_0]
+
+        block_start_s: float = _BLOCK_START_US[blk] * 1e-6
+        timestamps: np.ndarray = t0 + block_start_s + FIRING_OFFSETS_S[ring_0]
+
+        blocks.append(_BlockData(ring_0, valid, dist_m, horiz_deg, timestamps))
+    return blocks
 
 
 # ── Public decode functions ───────────────────────────────────────────────────
@@ -182,39 +229,21 @@ def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
     _, t0 = _parse_tail(payload)
 
     block_arrays: list[np.ndarray] = []
-    for blk in range(2):
-        az_raw: int = struct.unpack_from("<H", payload, _BLOCK_AZ_OFFSETS[blk])[0]
-        channels: np.ndarray = np.frombuffer(
-            payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK_CH_OFFSETS[blk]
-        )
+    for bd in _extract_blocks(payload, calibration, t0):
+        horiz_rad = np.deg2rad(bd.horiz_deg)
+        elev_rad = calibration.elevations_rad[bd.ring_0]
+        x, y, z = _spherical_to_xyz(bd.dist_m, horiz_rad, elev_rad)
 
-        mask: np.ndarray = channels["distance"] > 0
-        if not np.any(mask):
-            continue
-
-        ring_0: np.ndarray = np.where(mask)[0]  # 0-based ring indices of valid channels
-        valid = channels[mask]
-
-        dist_m: np.ndarray = valid["distance"].astype(np.float64) * DIS_UNIT_M
-        horiz_deg: np.ndarray = az_raw * 0.01 + calibration.azimuth_offsets_deg[ring_0]
-        horiz_rad: np.ndarray = np.deg2rad(horiz_deg)
-        elev_rad: np.ndarray = calibration.elevations_rad[ring_0]
-
-        x, y, z = _spherical_to_xyz(dist_m, horiz_rad, elev_rad)
-
-        block_start_s: float = _BLOCK_START_US[blk] * 1e-6
-        timestamps: np.ndarray = t0 + block_start_s + FIRING_OFFSETS_S[ring_0]
-
-        n: int = int(np.count_nonzero(mask))
+        n = len(bd.valid)
         arr = np.empty(n, dtype=POINT_DTYPE)
         arr["x"] = x.astype(np.float32)
         arr["y"] = y.astype(np.float32)
         arr["z"] = z.astype(np.float32)
-        arr["intensity"] = valid["reflectivity"].astype(np.float32)
-        arr["ring"] = (ring_0 + 1).astype(np.uint16)
-        arr["timestamp"] = timestamps
-        arr["contamination"] = (valid["confidence"] >> 6).astype(np.uint8)
-        arr["noise_level"] = (valid["confidence"] & 0x3F).astype(np.uint8)
+        arr["intensity"] = bd.valid["reflectivity"].astype(np.float32)
+        arr["ring"] = (bd.ring_0 + 1).astype(np.uint16)
+        arr["timestamp"] = bd.timestamps
+        arr["contamination"] = (bd.valid["confidence"] >> 6).astype(np.uint8)
+        arr["noise_level"] = (bd.valid["confidence"] & 0x3F).astype(np.uint8)
 
         block_arrays.append(arr)
 
@@ -226,45 +255,22 @@ def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
 def _decode_packet_spherical(payload: bytes, calibration: Calibration) -> np.ndarray:
     """Decode one payload into a SPHERICAL_DTYPE array (no trig conversion).
 
-    Identical pipeline to decode_packet up to — but not including — the XYZ
-    trig step. The azimuth_deg field contains the calibration-corrected azimuth
-    so callers can build consistent per-channel range images without re-applying
-    the per-channel offset.
-
     Not part of the public API; accessed via Decoder(output_mode="spherical").
     """
     _validate_payload(payload)
     _, t0 = _parse_tail(payload)
 
     block_arrays: list[np.ndarray] = []
-    for blk in range(2):
-        az_raw: int = struct.unpack_from("<H", payload, _BLOCK_AZ_OFFSETS[blk])[0]
-        channels: np.ndarray = np.frombuffer(
-            payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK_CH_OFFSETS[blk]
-        )
-
-        mask: np.ndarray = channels["distance"] > 0
-        if not np.any(mask):
-            continue
-
-        ring_0: np.ndarray = np.where(mask)[0]  # 0-based ring indices of valid channels
-        valid = channels[mask]
-
-        dist_m: np.ndarray = valid["distance"].astype(np.float64) * DIS_UNIT_M
-        horiz_deg: np.ndarray = az_raw * 0.01 + calibration.azimuth_offsets_deg[ring_0]
-
-        block_start_s: float = _BLOCK_START_US[blk] * 1e-6
-        timestamps: np.ndarray = t0 + block_start_s + FIRING_OFFSETS_S[ring_0]
-
-        n: int = int(np.count_nonzero(mask))
+    for bd in _extract_blocks(payload, calibration, t0):
+        n = len(bd.valid)
         arr = np.empty(n, dtype=SPHERICAL_DTYPE)
-        arr["channel"] = (ring_0 + 1).astype(np.uint8)
-        arr["azimuth_deg"] = horiz_deg.astype(np.float32)
-        arr["distance_m"] = dist_m.astype(np.float32)
-        arr["intensity"] = valid["reflectivity"].astype(np.float32)
-        arr["timestamp"] = timestamps
-        arr["contamination"] = (valid["confidence"] >> 6).astype(np.uint8)
-        arr["noise_level"] = (valid["confidence"] & 0x3F).astype(np.uint8)
+        arr["channel"] = (bd.ring_0 + 1).astype(np.uint16)
+        arr["azimuth_deg"] = bd.horiz_deg.astype(np.float32)
+        arr["distance_m"] = bd.dist_m.astype(np.float32)
+        arr["intensity"] = bd.valid["reflectivity"].astype(np.float32)
+        arr["timestamp"] = bd.timestamps
+        arr["contamination"] = (bd.valid["confidence"] >> 6).astype(np.uint8)
+        arr["noise_level"] = (bd.valid["confidence"] & 0x3F).astype(np.uint8)
 
         block_arrays.append(arr)
 

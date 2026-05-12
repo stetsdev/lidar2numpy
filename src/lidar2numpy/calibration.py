@@ -88,7 +88,9 @@ def load_calibration(source: _SOURCE) -> Calibration:
         body_lines = lines
 
     # Validate checksum if present; warn (never raise) if absent or mismatched.
-    body_text = "\n".join(body_lines) + "\n"
+    body_text = "\r\n".join(body_lines) + "\r\n"
+    if hashlib.sha256(body_text.encode()).hexdigest() != (checksum_expected or ""):
+        body_text = "\n".join(body_lines) + "\n"
     if checksum_expected is not None:
         actual = hashlib.sha256(body_text.encode()).hexdigest()
         if actual != checksum_expected:
@@ -125,7 +127,9 @@ def load_calibration(source: _SOURCE) -> Calibration:
     # Sort by channel number and build arrays indexed 0..(127).
     rows.sort(key=lambda r: r[0])
     elevations_rad = np.array([np.deg2rad(r[1]) for r in rows], dtype=np.float64)
+    elevations_rad.flags.writeable = False
     azimuth_offsets_deg = np.array([r[2] for r in rows], dtype=np.float64)
+    azimuth_offsets_deg.flags.writeable = False
 
     return Calibration(elevations_rad=elevations_rad, azimuth_offsets_deg=azimuth_offsets_deg)
 

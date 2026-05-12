@@ -83,7 +83,7 @@ POINT_DTYPE: np.dtype[np.void] = np.dtype(
 # channel is 1-based (1–128) to match the ring field in POINT_DTYPE.
 SPHERICAL_DTYPE: np.dtype[np.void] = np.dtype(
     [
-        ("channel", np.uint8),
+        ("channel", np.uint16),
         ("azimuth_deg", np.float32),  # calibration-corrected, degrees
         ("distance_m", np.float32),  # metres
         ("intensity", np.float32),

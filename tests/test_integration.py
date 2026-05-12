@@ -63,7 +63,11 @@ def _iter_udp_payloads(pcap_path: Path, max_packets: int) -> Iterator[bytes]:
         if len(global_hdr) < _PCAP_HEADER_LEN:
             raise ValueError("File too short to be a valid pcap")
         magic = struct.unpack_from("<I", global_hdr, 0)[0]
-        if magic not in (0xA1B2C3D4, 0xD4C3B2A1):
+        if magic == 0xA1B2C3D4:
+            endian = "<"
+        elif magic == 0xD4C3B2A1:
+            endian = ">"
+        else:
             raise ValueError(f"Unexpected pcap magic: 0x{magic:08X}")
 
         count = 0
@@ -71,7 +75,7 @@ def _iter_udp_payloads(pcap_path: Path, max_packets: int) -> Iterator[bytes]:
             rec_hdr = f.read(_RECORD_HEADER_LEN)
             if len(rec_hdr) < _RECORD_HEADER_LEN:
                 break
-            incl_len = struct.unpack_from("<I", rec_hdr, 8)[0]
+            incl_len = struct.unpack_from(f"{endian}I", rec_hdr, 8)[0]
             raw = f.read(incl_len)
             if len(raw) < incl_len:
                 break
