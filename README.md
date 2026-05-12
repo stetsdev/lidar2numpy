@@ -70,6 +70,23 @@ for payload in udp_payloads:
         ...
 ```
 
+### Reading pcap files
+
+```python
+from lidar2numpy import read_pcap_payloads, Decoder, load_calibration
+
+calibration = load_calibration("angle_corrections.csv")
+decoder = Decoder(calibration)
+
+for payload in read_pcap_payloads("capture.pcap"):
+    frame = decoder.feed(payload)
+    if frame is not None:
+        ...
+```
+
+`read_pcap_payloads()` yields raw 1100-byte UDP payloads from a standard pcap file, stripping Ethernet/IP/UDP headers. It handles both microsecond and nanosecond pcap variants and both byte orders.
+
+
 `to_cartesian()` accepts any subset or slice of a spherical frame — it does
 not require a complete 360° rotation.
 
@@ -115,6 +132,7 @@ equivalent up to float32 precision.
 src/lidar2numpy/
 ├── __init__.py            # Public API
 ├── decoder.py             # decode_packet(), to_cartesian(): bytes → POINT_DTYPE / SPHERICAL_DTYPE
+├── pcap.py                # read_pcap_payloads(): pcap file → UDP payloads
 ├── frame_assembler.py     # FrameAssembler: azimuth-rollover frame detection
 ├── structs.py             # POINT_DTYPE, SPHERICAL_DTYPE, ReturnMode, packet constants
 ├── calibration.py         # load_calibration() / default_calibration()
