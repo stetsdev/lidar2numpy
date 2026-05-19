@@ -34,6 +34,9 @@ uv sync
 
 ## Usage
 
+For a fuller reference covering the public API and repository scripts, see
+[docs/usage.md](docs/usage.md).
+
 ### Cartesian (default)
 
 ```python
