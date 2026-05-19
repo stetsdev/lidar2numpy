@@ -95,10 +95,19 @@ class TestValidationErrors:
             decode_packet(pkt, _flat_cal())
 
     @pytest.mark.parametrize("code", [0x39, 0x3B, 0x3C])
-    def test_dual_return_mode_raises(self, code: int) -> None:
-        pkt = build_packet(return_mode=code)
-        with pytest.raises(NotImplementedError):
-            decode_packet(pkt, _flat_cal())
+    def test_dual_return_modes_decode(self, code: int) -> None:
+        pkt = build_packet(
+            return_mode=code,
+            block1_az=1000,
+            block2_az=1000,
+            block1_channels={0: (250, 100, 0)},
+            block2_channels={0: (300, 120, 0)},
+        )
+        result = decode_packet(pkt, _flat_cal())
+
+        assert len(result) == 2
+        assert result["ring"].tolist() == [1, 1]
+        assert result["intensity"].tolist() == pytest.approx([100.0, 120.0])
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +348,28 @@ class TestTimestamp:
         expected_delta = (BLOCK2_START_US - BLOCK1_START_US) * 1e-6
         # float64 at ~1.746e9 epoch has ~400 ns ULP; allow 1 µs tolerance
         assert delta == pytest.approx(expected_delta, abs=1e-6)
+
+    def test_dual_return_blocks_share_timestamp_offset(self) -> None:
+        year, month, day, hour, minute, second, frac_us = 125, 5, 6, 12, 0, 0, 0
+        pkt = build_packet(
+            return_mode=0x39,
+            year=year,
+            month=month,
+            day=day,
+            hour=hour,
+            minute=minute,
+            second=second,
+            frac_us=frac_us,
+            block1_channels={0: (250, 100, 0)},
+            block2_channels={0: (300, 120, 0)},
+        )
+        result = decode_packet(pkt, _flat_cal())
+
+        t0 = datetime(
+            year + 1900, month, day, hour, minute, second, frac_us, tzinfo=timezone.utc
+        ).timestamp()
+        expected_ts = t0 + BLOCK2_START_US * 1e-6 + FIRING_OFFSETS_S[0]
+        assert result["timestamp"].tolist() == pytest.approx([expected_ts, expected_ts], abs=1e-9)
 
     def test_timestamp_dtype_is_float64(self) -> None:
         pkt = build_packet(block1_channels={0: (250, 100, 0)})

@@ -99,12 +99,6 @@ def _parse_tail(payload: bytes) -> tuple[ReturnMode, float]:
     except ValueError:
         raise ValueError(f"Unknown return mode byte: 0x{return_mode_byte:02X}") from None
 
-    if return_mode.is_dual:
-        raise NotImplementedError(
-            f"Dual return mode 0x{return_mode_byte:02X} ({return_mode.name}) "
-            "is not yet emitted by production JT128 firmware; not implemented"
-        )
-
     year_: int
     month: int
     day: int
@@ -170,10 +164,13 @@ class _BlockData:
 
 
 def _extract_blocks(
-    payload: bytes, calibration: Calibration, t0: float
+    payload: bytes, calibration: Calibration, return_mode: ReturnMode, t0: float
 ) -> list[_BlockData]:
     """Parse both blocks from a validated payload into intermediate arrays."""
     blocks: list[_BlockData] = []
+    block_start_us = (
+        (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
+    )
     for blk in range(2):
         az_raw: int = struct.unpack_from("<H", payload, _BLOCK_AZ_OFFSETS[blk])[0]
         channels: np.ndarray = np.frombuffer(
@@ -190,7 +187,7 @@ def _extract_blocks(
         dist_m: np.ndarray = valid["distance"].astype(np.float64) * DIS_UNIT_M
         horiz_deg: np.ndarray = az_raw * 0.01 + calibration.azimuth_offsets_deg[ring_0]
 
-        block_start_s: float = _BLOCK_START_US[blk] * 1e-6
+        block_start_s: float = block_start_us[blk] * 1e-6
         timestamps: np.ndarray = t0 + block_start_s + FIRING_OFFSETS_S[ring_0]
 
         blocks.append(_BlockData(ring_0, valid, dist_m, horiz_deg, timestamps))
@@ -221,15 +218,14 @@ def decode_packet(payload: bytes, calibration: Calibration) -> np.ndarray:
     ValueError
         If ``len(payload) != 1100``, SOP bytes are wrong, protocol version is
         unsupported, or the confidence flag (header bit 5) is not set.
-    NotImplementedError
-        If the Return Mode byte indicates a dual-return mode (codes 0x39,
-        0x3B, 0x3C) — not yet supported.
+    ValueError
+        If the Return Mode byte is unknown.
     """
     _validate_payload(payload)
-    _, t0 = _parse_tail(payload)
+    return_mode, t0 = _parse_tail(payload)
 
     block_arrays: list[np.ndarray] = []
-    for bd in _extract_blocks(payload, calibration, t0):
+    for bd in _extract_blocks(payload, calibration, return_mode, t0):
         horiz_rad = np.deg2rad(bd.horiz_deg)
         elev_rad = calibration.elevations_rad[bd.ring_0]
         x, y, z = _spherical_to_xyz(bd.dist_m, horiz_rad, elev_rad)
@@ -258,10 +254,10 @@ def _decode_packet_spherical(payload: bytes, calibration: Calibration) -> np.nda
     Not part of the public API; accessed via Decoder(output_mode="spherical").
     """
     _validate_payload(payload)
-    _, t0 = _parse_tail(payload)
+    return_mode, t0 = _parse_tail(payload)
 
     block_arrays: list[np.ndarray] = []
-    for bd in _extract_blocks(payload, calibration, t0):
+    for bd in _extract_blocks(payload, calibration, return_mode, t0):
         n = len(bd.valid)
         arr = np.empty(n, dtype=SPHERICAL_DTYPE)
         arr["channel"] = (bd.ring_0 + 1).astype(np.uint16)
