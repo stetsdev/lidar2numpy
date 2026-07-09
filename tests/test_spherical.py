@@ -387,6 +387,28 @@ class TestSphericalDecodeParity:
         assert actual.dtype == SPHERICAL_DTYPE
         np.testing.assert_array_equal(actual, expected)
 
+    def test_dense_blocks_bypass_nonzero_compaction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import lidar2numpy.decoder as decoder_module
+
+        packet = build_packet(
+            return_mode=0x39,
+            block1_az=35950,
+            block2_az=42,
+            block1_channels={i: (800 + i, i % 256, (i * 7) % 256) for i in range(128)},
+            block2_channels={i: (1200 + i, (255 - i) % 256, (i * 11) % 256) for i in range(128)},
+            frac_us=123_456,
+        )
+        calibration = _mixed_cal()
+        expected = _reference_decode_packet_spherical(packet, calibration)
+
+        def _fail_nonzero(*_args: object, **_kwargs: object) -> np.ndarray:
+            raise AssertionError("dense blocks should not need np.nonzero")
+
+        monkeypatch.setattr(decoder_module.np, "nonzero", _fail_nonzero)
+
+        actual = _decode_packet_spherical(packet, calibration)
+        np.testing.assert_array_equal(actual, expected)
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility

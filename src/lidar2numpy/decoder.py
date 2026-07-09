@@ -63,6 +63,8 @@ _CONFIDENCE_FLAG: int = 0x20  # header flags bit[5]
 _BLOCK_AZ_OFFSETS: tuple[int, int] = (_BLOCK1_AZ_OFFSET, _BLOCK2_AZ_OFFSET)
 _BLOCK_CH_OFFSETS: tuple[int, int] = (_BLOCK1_CH_OFFSET, _BLOCK2_CH_OFFSET)
 _BLOCK_START_US: tuple[float, float] = (BLOCK1_START_US, BLOCK2_START_US)
+_RING_0: np.ndarray = np.arange(128, dtype=np.intp)
+_CHANNELS_U16: np.ndarray = np.arange(1, 129, dtype=np.uint16)
 
 
 class _SphericalFrameAssembler(Protocol):
@@ -358,6 +360,18 @@ def _fill_spherical_block(  # noqa: PLR0913
     block_start_s: float,
 ) -> None:
     """Fill one SPHERICAL_DTYPE block slice from a validated packet."""
+    if len(out) == 128:
+        confidence = channels["confidence"]
+
+        out["channel"] = _CHANNELS_U16
+        out["azimuth_deg"] = az_raw * 0.01 + calibration.azimuth_offsets_deg
+        out["distance_m"] = channels["distance"].astype(np.float64) * DIS_UNIT_M
+        out["intensity"] = channels["reflectivity"]
+        out["timestamp"] = block_start_s + FIRING_OFFSETS_S
+        out["contamination"] = confidence >> 6
+        out["noise_level"] = confidence & 0x3F
+        return
+
     ring_0 = np.nonzero(mask)[0]
     confidence = channels["confidence"][mask]
 
