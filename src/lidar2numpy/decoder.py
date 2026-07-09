@@ -89,7 +89,7 @@ class _SphericalFeedResult:
     frame_emitted: bool
     input_points: int
     output_points: int
-    dropped_by_channel: np.ndarray
+    dropped_by_channel: np.ndarray | None
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -458,10 +458,8 @@ def _feed_filtered_spherical_packet(  # noqa: PLR0913
             t0 + block_start_us[1] * 1e-6,
         )
 
-    dropped_by_channel = np.bincount(
-        np.concatenate((np.nonzero(dropped_1)[0], np.nonzero(dropped_2)[0])),
-        minlength=128,
-    )
+    dropped_by_channel = dropped_1.astype(np.int64)
+    dropped_by_channel += dropped_2
     return _spherical_feed_result(
         frame,
         frame is not None,
@@ -490,8 +488,6 @@ def _spherical_feed_result(
     output_points: int = 0,
     dropped_by_channel: np.ndarray | None = None,
 ) -> _SphericalFeedResult:
-    if dropped_by_channel is None:
-        dropped_by_channel = np.zeros(128, dtype=np.int64)
     return _SphericalFeedResult(
         frame=frame,
         frame_emitted=frame_emitted,

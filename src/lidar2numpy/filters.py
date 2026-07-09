@@ -94,18 +94,30 @@ class ChannelAzimuthFilter:
             raise ValueError("channel_azimuth_drops must be a list of channel records")
 
         ranges_by_channel: dict[int, tuple[_Range, ...]] = {}
+        full_circle_channels: set[int] = set()
         for record in channel_ranges:
             if not isinstance(record, Mapping):
                 raise ValueError("channel_azimuth_drops entries must be objects")
             channel_value = record.get("channel")
             ranges_value = record.get("ranges_deg", ())
             channel = _validate_channel(channel_value, "channel_azimuth_drops.channel")
-            ranges_by_channel[channel] = _coerce_ranges(ranges_value, channel)
+            ranges, full_circle = _normalize_ranges(channel, _coerce_ranges(ranges_value, channel))
+            if full_circle:
+                if channel in ranges_by_channel:
+                    raise ValueError(f"duplicate channel {channel} has conflicting ranges")
+                full_circle_channels.add(channel)
+                continue
+            if channel in full_circle_channels or (
+                channel in ranges_by_channel and ranges_by_channel[channel] != ranges
+            ):
+                raise ValueError(f"duplicate channel {channel} has conflicting ranges")
+            ranges_by_channel[channel] = ranges
 
         if not isinstance(drop_channels, Iterable) or isinstance(drop_channels, (str, bytes)):
             raise ValueError("drop_channels must be an iterable of channel integers")
         return cls(
-            tuple(_validate_channel(ch, "drop_channels") for ch in drop_channels),
+            tuple(_validate_channel(ch, "drop_channels") for ch in drop_channels)
+            + tuple(sorted(full_circle_channels)),
             ranges_by_channel,
         )
 

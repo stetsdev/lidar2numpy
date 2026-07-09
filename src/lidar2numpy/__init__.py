@@ -238,9 +238,9 @@ class Decoder:
         self,
         input_points: int,
         output_points: int,
-        dropped_by_channel: np.ndarray,
+        dropped_by_channel: np.ndarray | None,
     ) -> None:
-        if self._prepared_filter is None:
+        if self._prepared_filter is None or dropped_by_channel is None:
             return
         self._active_filter_input_points += input_points
         self._active_filter_output_points += output_points
