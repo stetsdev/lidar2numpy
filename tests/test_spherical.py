@@ -464,3 +464,86 @@ class TestBackwardCompat:
         assert result.dtype == POINT_DTYPE
         assert result["x"][0] == pytest.approx(1.0, abs=1e-4)
         assert result["y"][0] == pytest.approx(0.0, abs=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Decoder spherical direct-frame path
+# ---------------------------------------------------------------------------
+
+
+class TestSphericalDecoderDirectFramePath:
+    def test_feed_bypasses_allocating_packet_decoder(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Live spherical feed should decode directly into the frame assembler."""
+        import lidar2numpy.decoder as decoder_module
+        from lidar2numpy import Decoder
+
+        def _fail_packet_decoder(*_args: object, **_kwargs: object) -> np.ndarray:
+            raise AssertionError("_decode_packet_spherical should not be used by Decoder.feed")
+
+        monkeypatch.setattr(decoder_module, "_decode_packet_spherical", _fail_packet_decoder)
+
+        decoder = Decoder(_flat_cal(), output_mode="spherical")
+        decoder.feed(build_packet(block1_az=35000))
+        decoder.feed(build_packet(block1_az=36))
+        decoder.feed(build_packet(block1_az=100, block1_channels={0: (250, 17, 0xC5)}))
+
+        frame = decoder.flush()
+        assert frame is not None
+        assert frame.dtype == SPHERICAL_DTYPE
+        assert len(frame) == 1
+        assert int(frame["channel"][0]) == 1
+
+    def test_frames_match_manual_packet_decode_and_assembly(self) -> None:
+        from lidar2numpy import Decoder, FrameAssembler, block1_azimuth
+
+        cal = _mixed_cal()
+        packets = [
+            build_packet(block1_az=35000, block1_channels={0: (100, 1, 0x01)}),
+            build_packet(block1_az=36, block1_channels={1: (200, 2, 0x02)}),
+            build_packet(block1_az=100, block1_channels={2: (300, 3, 0x03)}),
+            build_packet(block1_az=200, block2_channels={64: (400, 4, 0x44)}),
+            build_packet(block1_az=35800, block1_channels={127: (500, 5, 0x85)}),
+            build_packet(block1_az=100, block1_channels={3: (600, 6, 0xC6)}),
+        ]
+
+        expected_assembler = FrameAssembler(dtype=SPHERICAL_DTYPE)
+        expected_frames: list[np.ndarray] = []
+        for packet in packets:
+            frame = expected_assembler.add_packet(
+                _decode_packet_spherical(packet, cal), block1_azimuth(packet)
+            )
+            if frame is not None:
+                expected_frames.append(frame)
+
+        decoder = Decoder(cal, output_mode="spherical")
+        actual_frames: list[np.ndarray] = []
+        for packet in packets:
+            frame = decoder.feed(packet)
+            if frame is not None:
+                actual_frames.append(frame)
+
+        assert len(actual_frames) == len(expected_frames) == 1
+        np.testing.assert_array_equal(actual_frames[0], expected_frames[0])
+
+    def test_emitted_frame_is_not_mutated_by_later_feeds(self) -> None:
+        from lidar2numpy import Decoder
+
+        decoder = Decoder(_flat_cal(), output_mode="spherical")
+        decoder.feed(build_packet(block1_az=35000))
+        decoder.feed(build_packet(block1_az=36))
+        decoder.feed(build_packet(block1_az=100, block1_channels={0: (250, 1, 0x01)}))
+        decoder.feed(build_packet(block1_az=35800, block1_channels={1: (500, 2, 0x02)}))
+        emitted = decoder.feed(build_packet(block1_az=100, block1_channels={2: (750, 3, 0x03)}))
+        assert emitted is not None
+        snapshot = emitted.copy()
+
+        for i in range(200):
+            decoder.feed(
+                build_packet(
+                    block1_az=200 + i,
+                    block1_channels={ch: (1000 + ch, ch % 256, ch % 64) for ch in range(128)},
+                    block2_channels={ch: (2000 + ch, ch % 256, ch % 64) for ch in range(128)},
+                )
+            )
+
+        np.testing.assert_array_equal(emitted, snapshot)

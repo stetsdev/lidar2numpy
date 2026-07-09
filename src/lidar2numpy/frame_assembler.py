@@ -62,18 +62,24 @@ class FrameAssembler:
             is detected and the assembler has passed the startup discard
             phase. ``None`` otherwise.
         """
-        frame: np.ndarray | None = None
+        frame, should_buffer = self._begin_packet(block1_az)
+        if should_buffer:
+            out = self._reserve(len(points))
+            if len(points) > 0:
+                out[:] = points
+        return frame
 
+    def _begin_packet(self, block1_az: int) -> tuple[np.ndarray | None, bool]:
+        """Advance rollover state before buffering the current packet."""
+        frame: np.ndarray | None = None
         if self._last_az is not None and self._is_rollover(block1_az, self._last_az):
             if self._started:
                 frame = self._finish_frame()
             else:
                 self._started = True
 
-        if self._started:
-            self._append(points)
         self._last_az = block1_az
-        return frame
+        return frame, self._started
 
     def flush(self) -> np.ndarray | None:
         """Return and clear the in-progress frame.
@@ -100,11 +106,10 @@ class FrameAssembler:
         """
         return current_az < last_az and (last_az - current_az) > _ROLLOVER_THRESHOLD
 
-    def _append(self, points: np.ndarray) -> None:
+    def _reserve(self, n_points: int) -> np.ndarray:
         self._has_buffered_packets = True
-        n_points = len(points)
         if n_points == 0:
-            return
+            return self._buffer[self._size : self._size]
 
         required = self._size + n_points
         if required > len(self._buffer):
@@ -114,8 +119,9 @@ class FrameAssembler:
                 new_buffer[: self._size] = self._buffer[: self._size]
             self._buffer = new_buffer
 
-        self._buffer[self._size : required] = points
+        start = self._size
         self._size = required
+        return self._buffer[start:required]
 
     def _finish_frame(self) -> np.ndarray:
         if self._size == 0:
