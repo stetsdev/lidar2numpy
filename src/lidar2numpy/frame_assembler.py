@@ -40,7 +40,9 @@ class FrameAssembler:
     def __init__(self, dtype: np.dtype = POINT_DTYPE) -> None:
         self._dtype = dtype
         self._last_az: int | None = None
-        self._buffered: list[np.ndarray] = []
+        self._buffer: np.ndarray = np.empty(4096, dtype=dtype)
+        self._size: int = 0
+        self._has_buffered_packets: bool = False
         self._started: bool = False  # True after the first rollover is observed
 
     def add_packet(self, points: np.ndarray, block1_az: int) -> np.ndarray | None:
@@ -64,15 +66,12 @@ class FrameAssembler:
 
         if self._last_az is not None and self._is_rollover(block1_az, self._last_az):
             if self._started:
-                # Emit the completed frame; start fresh with the current packet.
-                frame = self._concat_buffer()
-                self._buffered = []
+                frame = self._finish_frame()
             else:
-                # First rollover: discard the startup partial frame and start tracking.
-                self._buffered = []
                 self._started = True
 
-        self._buffered.append(points)
+        if self._started:
+            self._append(points)
         self._last_az = block1_az
         return frame
 
@@ -83,11 +82,9 @@ class FrameAssembler:
         partial frame is buffered. Returns ``None`` if the startup discard
         phase has not completed yet (no rollover seen) or the buffer is empty.
         """
-        if not self._started or not self._buffered:
+        if not self._started or not self._has_buffered_packets:
             return None
-        frame = self._concat_buffer()
-        self._buffered = []
-        return frame
+        return self._finish_frame()
 
     # ── Private helpers ──────────────────────────────────────────────────────
 
@@ -103,9 +100,30 @@ class FrameAssembler:
         """
         return current_az < last_az and (last_az - current_az) > _ROLLOVER_THRESHOLD
 
-    def _concat_buffer(self) -> np.ndarray:
-        """Concatenate buffered arrays; return empty array of self._dtype if all empty."""
-        non_empty = [a for a in self._buffered if len(a) > 0]
-        if not non_empty:
+    def _append(self, points: np.ndarray) -> None:
+        self._has_buffered_packets = True
+        n_points = len(points)
+        if n_points == 0:
+            return
+
+        required = self._size + n_points
+        if required > len(self._buffer):
+            new_capacity = max(required, max(1, len(self._buffer) * 2))
+            new_buffer = np.empty(new_capacity, dtype=self._dtype)
+            if self._size > 0:
+                new_buffer[: self._size] = self._buffer[: self._size]
+            self._buffer = new_buffer
+
+        self._buffer[self._size : required] = points
+        self._size = required
+
+    def _finish_frame(self) -> np.ndarray:
+        if self._size == 0:
+            self._has_buffered_packets = False
             return np.empty(0, dtype=self._dtype)
-        return np.concatenate(non_empty)
+
+        frame = self._buffer[: self._size]
+        self._buffer = np.empty(len(self._buffer), dtype=self._dtype)
+        self._size = 0
+        self._has_buffered_packets = False
+        return frame

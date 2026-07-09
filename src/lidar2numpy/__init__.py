@@ -51,10 +51,10 @@ from typing import BinaryIO, Literal, Union
 
 import numpy as np
 
-from .pcap import read_pcap_payloads
 from .calibration import Calibration, default_calibration, load_calibration
 from .decoder import block1_azimuth, decode_packet, to_cartesian
 from .frame_assembler import FrameAssembler
+from .pcap import read_pcap_payloads
 from .structs import POINT_DTYPE, SPHERICAL_DTYPE, ReturnMode
 
 __all__ = [
@@ -144,7 +144,7 @@ class Decoder:
 
         Decodes *every* packet unconditionally.  The azimuth rollover check
         in :class:`FrameAssembler` determines when to emit a frame.
- 
+
         Parameters
         ----------
         payload:
