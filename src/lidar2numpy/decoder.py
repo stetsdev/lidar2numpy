@@ -22,6 +22,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Protocol
 
 import numpy as np
 
@@ -62,6 +63,23 @@ _CONFIDENCE_FLAG: int = 0x20  # header flags bit[5]
 _BLOCK_AZ_OFFSETS: tuple[int, int] = (_BLOCK1_AZ_OFFSET, _BLOCK2_AZ_OFFSET)
 _BLOCK_CH_OFFSETS: tuple[int, int] = (_BLOCK1_CH_OFFSET, _BLOCK2_CH_OFFSET)
 _BLOCK_START_US: tuple[float, float] = (BLOCK1_START_US, BLOCK2_START_US)
+_CHANNELS_U16: np.ndarray = np.arange(1, 129, dtype=np.uint16)
+
+
+class _SphericalFrameAssembler(Protocol):
+    def _begin_packet(self, block1_az: int) -> tuple[np.ndarray | None, bool]: ...
+
+    def _reserve(self, n_points: int) -> np.ndarray: ...
+
+
+@dataclass
+class _SphericalPacketParts:
+    channels_1: np.ndarray
+    channels_2: np.ndarray
+    mask_1: np.ndarray
+    mask_2: np.ndarray
+    count_1: int
+    count_2: int
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -110,9 +128,7 @@ def _parse_tail(payload: bytes) -> tuple[ReturnMode, float]:
     )
     frac_us: int = struct.unpack_from("<I", payload, _TAIL_OFFSET + _TAIL_OFF_FRAC_SEC)[0]
     if frac_us >= 1_000_000:
-        raise ValueError(
-            f"Fractional microseconds field is {frac_us}; expected < 1 000 000"
-        )
+        raise ValueError(f"Fractional microseconds field is {frac_us}; expected < 1 000 000")
     t0: float = datetime(
         year_ + 1900,
         month,
@@ -168,9 +184,7 @@ def _extract_blocks(
 ) -> list[_BlockData]:
     """Parse both blocks from a validated payload into intermediate arrays."""
     blocks: list[_BlockData] = []
-    block_start_us = (
-        (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
-    )
+    block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
     for blk in range(2):
         az_raw: int = struct.unpack_from("<H", payload, _BLOCK_AZ_OFFSETS[blk])[0]
         channels: np.ndarray = np.frombuffer(
@@ -256,23 +270,122 @@ def _decode_packet_spherical(payload: bytes, calibration: Calibration) -> np.nda
     _validate_payload(payload)
     return_mode, t0 = _parse_tail(payload)
 
-    block_arrays: list[np.ndarray] = []
-    for bd in _extract_blocks(payload, calibration, return_mode, t0):
-        n = len(bd.valid)
-        arr = np.empty(n, dtype=SPHERICAL_DTYPE)
-        arr["channel"] = (bd.ring_0 + 1).astype(np.uint16)
-        arr["azimuth_deg"] = bd.horiz_deg.astype(np.float32)
-        arr["distance_m"] = bd.dist_m.astype(np.float32)
-        arr["intensity"] = bd.valid["reflectivity"].astype(np.float32)
-        arr["timestamp"] = bd.timestamps
-        arr["contamination"] = (bd.valid["confidence"] >> 6).astype(np.uint8)
-        arr["noise_level"] = (bd.valid["confidence"] & 0x3F).astype(np.uint8)
-
-        block_arrays.append(arr)
-
-    if not block_arrays:
+    parts = _extract_spherical_packet_parts(payload)
+    total = parts.count_1 + parts.count_2
+    if total == 0:
         return np.empty(0, dtype=SPHERICAL_DTYPE)
-    return np.concatenate(block_arrays)
+
+    arr = np.empty(total, dtype=SPHERICAL_DTYPE)
+    block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
+    if parts.count_1 > 0:
+        az_raw_1 = struct.unpack_from("<H", payload, _BLOCK1_AZ_OFFSET)[0]
+        _fill_spherical_block(
+            arr[: parts.count_1],
+            parts.channels_1,
+            parts.mask_1,
+            az_raw_1,
+            calibration,
+            t0 + block_start_us[0] * 1e-6,
+        )
+    if parts.count_2 > 0:
+        az_raw_2 = struct.unpack_from("<H", payload, _BLOCK2_AZ_OFFSET)[0]
+        _fill_spherical_block(
+            arr[parts.count_1 :],
+            parts.channels_2,
+            parts.mask_2,
+            az_raw_2,
+            calibration,
+            t0 + block_start_us[1] * 1e-6,
+        )
+    return arr
+
+
+def _extract_spherical_packet_parts(payload: bytes) -> _SphericalPacketParts:
+    channels_1: np.ndarray = np.frombuffer(
+        payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK1_CH_OFFSET
+    )
+    channels_2: np.ndarray = np.frombuffer(
+        payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK2_CH_OFFSET
+    )
+    mask_1: np.ndarray = channels_1["distance"] > 0
+    mask_2: np.ndarray = channels_2["distance"] > 0
+    count_1 = int(np.count_nonzero(mask_1))
+    count_2 = int(np.count_nonzero(mask_2))
+    return _SphericalPacketParts(channels_1, channels_2, mask_1, mask_2, count_1, count_2)
+
+
+def _feed_packet_spherical(
+    payload: bytes, calibration: Calibration, assembler: _SphericalFrameAssembler
+) -> np.ndarray | None:
+    """Decode one spherical packet directly into a frame assembler buffer."""
+    _validate_payload(payload)
+    return_mode, t0 = _parse_tail(payload)
+
+    block1_az = struct.unpack_from("<H", payload, _BLOCK1_AZ_OFFSET)[0]
+    frame, should_buffer = assembler._begin_packet(block1_az)
+    if not should_buffer:
+        return frame
+
+    parts = _extract_spherical_packet_parts(payload)
+    total = parts.count_1 + parts.count_2
+    out = assembler._reserve(total)
+    if total == 0:
+        return frame
+
+    block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
+    if parts.count_1 > 0:
+        _fill_spherical_block(
+            out[: parts.count_1],
+            parts.channels_1,
+            parts.mask_1,
+            block1_az,
+            calibration,
+            t0 + block_start_us[0] * 1e-6,
+        )
+    if parts.count_2 > 0:
+        az_raw_2 = struct.unpack_from("<H", payload, _BLOCK2_AZ_OFFSET)[0]
+        _fill_spherical_block(
+            out[parts.count_1 :],
+            parts.channels_2,
+            parts.mask_2,
+            az_raw_2,
+            calibration,
+            t0 + block_start_us[1] * 1e-6,
+        )
+    return frame
+
+
+def _fill_spherical_block(  # noqa: PLR0913
+    out: np.ndarray,
+    channels: np.ndarray,
+    mask: np.ndarray,
+    az_raw: int,
+    calibration: Calibration,
+    block_start_s: float,
+) -> None:
+    """Fill one SPHERICAL_DTYPE block slice from a validated packet."""
+    if len(out) == 128:
+        confidence = channels["confidence"]
+
+        out["channel"] = _CHANNELS_U16
+        out["azimuth_deg"] = az_raw * 0.01 + calibration.azimuth_offsets_deg
+        out["distance_m"] = channels["distance"].astype(np.float64) * DIS_UNIT_M
+        out["intensity"] = channels["reflectivity"]
+        out["timestamp"] = block_start_s + FIRING_OFFSETS_S
+        out["contamination"] = confidence >> 6
+        out["noise_level"] = confidence & 0x3F
+        return
+
+    ring_0 = np.nonzero(mask)[0]
+    confidence = channels["confidence"][mask]
+
+    out["channel"] = ring_0 + 1
+    out["azimuth_deg"] = az_raw * 0.01 + calibration.azimuth_offsets_deg[ring_0]
+    out["distance_m"] = channels["distance"][mask].astype(np.float64) * DIS_UNIT_M
+    out["intensity"] = channels["reflectivity"][mask]
+    out["timestamp"] = block_start_s + FIRING_OFFSETS_S[ring_0]
+    out["contamination"] = confidence >> 6
+    out["noise_level"] = confidence & 0x3F
 
 
 def to_cartesian(spherical: np.ndarray, calibration: Calibration) -> np.ndarray:

@@ -51,10 +51,10 @@ from typing import BinaryIO, Literal, Union
 
 import numpy as np
 
-from .pcap import read_pcap_payloads
 from .calibration import Calibration, default_calibration, load_calibration
-from .decoder import block1_azimuth, decode_packet, to_cartesian
+from .decoder import _feed_packet_spherical, block1_azimuth, decode_packet, to_cartesian
 from .frame_assembler import FrameAssembler
+from .pcap import read_pcap_payloads
 from .structs import POINT_DTYPE, SPHERICAL_DTYPE, ReturnMode
 
 __all__ = [
@@ -144,7 +144,7 @@ class Decoder:
 
         Decodes *every* packet unconditionally.  The azimuth rollover check
         in :class:`FrameAssembler` determines when to emit a frame.
- 
+
         Parameters
         ----------
         payload:
@@ -158,11 +158,9 @@ class Decoder:
             rotation, or ``None`` if the current frame is still accumulating.
         """
         if self._output_mode == "spherical":
-            from .decoder import _decode_packet_spherical
+            return _feed_packet_spherical(payload, self._calibration, self._assembler)
 
-            points = _decode_packet_spherical(payload, self._calibration)
-        else:
-            points = decode_packet(payload, self._calibration)
+        points = decode_packet(payload, self._calibration)
         az = block1_azimuth(payload)
         return self._assembler.add_packet(points, az)
 

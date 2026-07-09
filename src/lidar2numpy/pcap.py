@@ -3,13 +3,14 @@
 # ---------------------------------------------------------------------------
 
 import struct
+from collections.abc import Iterator
 from pathlib import Path
 
 _PCAP_MAGIC_US = 0xA1B2C3D4
 _PCAP_MAGIC_NS = 0xA1B23C4D
 
 
-def read_pcap_payloads(pcap_path: Path, udp_payload_size: int = 1100):
+def read_pcap_payloads(pcap_path: Path, udp_payload_size: int = 1100) -> Iterator[bytes]:
     """Yield UDP payloads from a pcap file, stripping Ethernet+IP+UDP headers."""
     with open(pcap_path, "rb") as f:
         global_header = f.read(24)
@@ -40,4 +41,3 @@ def read_pcap_payloads(pcap_path: Path, udp_payload_size: int = 1100):
                 payload = data[42 : 42 + udp_payload_size]
                 if len(payload) == udp_payload_size:
                     yield payload
-
