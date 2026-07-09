@@ -515,6 +515,20 @@ class TestSphericalDecoderDirectFramePath:
         assert len(frame) == 1
         assert int(frame["channel"][0]) == 1
 
+    def test_startup_discard_skips_spherical_block_extraction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import lidar2numpy.decoder as decoder_module
+        from lidar2numpy import Decoder
+
+        def _fail_extract(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("startup discard packets should not build block arrays")
+
+        monkeypatch.setattr(decoder_module, "_extract_spherical_packet_parts", _fail_extract)
+
+        decoder = Decoder(_flat_cal(), output_mode="spherical")
+        assert decoder.feed(build_packet(block1_az=35000)) is None
+
     def test_frames_match_manual_packet_decode_and_assembly(self) -> None:
         from lidar2numpy import Decoder, FrameAssembler, block1_azimuth
 

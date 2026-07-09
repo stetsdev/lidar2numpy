@@ -63,7 +63,6 @@ _CONFIDENCE_FLAG: int = 0x20  # header flags bit[5]
 _BLOCK_AZ_OFFSETS: tuple[int, int] = (_BLOCK1_AZ_OFFSET, _BLOCK2_AZ_OFFSET)
 _BLOCK_CH_OFFSETS: tuple[int, int] = (_BLOCK1_CH_OFFSET, _BLOCK2_CH_OFFSET)
 _BLOCK_START_US: tuple[float, float] = (BLOCK1_START_US, BLOCK2_START_US)
-_RING_0: np.ndarray = np.arange(128, dtype=np.intp)
 _CHANNELS_U16: np.ndarray = np.arange(1, 129, dtype=np.uint16)
 
 
@@ -71,6 +70,16 @@ class _SphericalFrameAssembler(Protocol):
     def _begin_packet(self, block1_az: int) -> tuple[np.ndarray | None, bool]: ...
 
     def _reserve(self, n_points: int) -> np.ndarray: ...
+
+
+@dataclass
+class _SphericalPacketParts:
+    channels_1: np.ndarray
+    channels_2: np.ndarray
+    mask_1: np.ndarray
+    mask_2: np.ndarray
+    count_1: int
+    count_2: int
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -261,6 +270,37 @@ def _decode_packet_spherical(payload: bytes, calibration: Calibration) -> np.nda
     _validate_payload(payload)
     return_mode, t0 = _parse_tail(payload)
 
+    parts = _extract_spherical_packet_parts(payload)
+    total = parts.count_1 + parts.count_2
+    if total == 0:
+        return np.empty(0, dtype=SPHERICAL_DTYPE)
+
+    arr = np.empty(total, dtype=SPHERICAL_DTYPE)
+    block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
+    if parts.count_1 > 0:
+        az_raw_1 = struct.unpack_from("<H", payload, _BLOCK1_AZ_OFFSET)[0]
+        _fill_spherical_block(
+            arr[: parts.count_1],
+            parts.channels_1,
+            parts.mask_1,
+            az_raw_1,
+            calibration,
+            t0 + block_start_us[0] * 1e-6,
+        )
+    if parts.count_2 > 0:
+        az_raw_2 = struct.unpack_from("<H", payload, _BLOCK2_AZ_OFFSET)[0]
+        _fill_spherical_block(
+            arr[parts.count_1 :],
+            parts.channels_2,
+            parts.mask_2,
+            az_raw_2,
+            calibration,
+            t0 + block_start_us[1] * 1e-6,
+        )
+    return arr
+
+
+def _extract_spherical_packet_parts(payload: bytes) -> _SphericalPacketParts:
     channels_1: np.ndarray = np.frombuffer(
         payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK1_CH_OFFSET
     )
@@ -271,33 +311,7 @@ def _decode_packet_spherical(payload: bytes, calibration: Calibration) -> np.nda
     mask_2: np.ndarray = channels_2["distance"] > 0
     count_1 = int(np.count_nonzero(mask_1))
     count_2 = int(np.count_nonzero(mask_2))
-    total = count_1 + count_2
-    if total == 0:
-        return np.empty(0, dtype=SPHERICAL_DTYPE)
-
-    arr = np.empty(total, dtype=SPHERICAL_DTYPE)
-    block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
-    if count_1 > 0:
-        az_raw_1 = struct.unpack_from("<H", payload, _BLOCK1_AZ_OFFSET)[0]
-        _fill_spherical_block(
-            arr[:count_1],
-            channels_1,
-            mask_1,
-            az_raw_1,
-            calibration,
-            t0 + block_start_us[0] * 1e-6,
-        )
-    if count_2 > 0:
-        az_raw_2 = struct.unpack_from("<H", payload, _BLOCK2_AZ_OFFSET)[0]
-        _fill_spherical_block(
-            arr[count_1:],
-            channels_2,
-            mask_2,
-            az_raw_2,
-            calibration,
-            t0 + block_start_us[1] * 1e-6,
-        )
-    return arr
+    return _SphericalPacketParts(channels_1, channels_2, mask_1, mask_2, count_1, count_2)
 
 
 def _feed_packet_spherical(
@@ -307,43 +321,33 @@ def _feed_packet_spherical(
     _validate_payload(payload)
     return_mode, t0 = _parse_tail(payload)
 
-    channels_1: np.ndarray = np.frombuffer(
-        payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK1_CH_OFFSET
-    )
-    channels_2: np.ndarray = np.frombuffer(
-        payload, dtype=_CHANNEL_DTYPE, count=128, offset=_BLOCK2_CH_OFFSET
-    )
-    mask_1: np.ndarray = channels_1["distance"] > 0
-    mask_2: np.ndarray = channels_2["distance"] > 0
-    count_1 = int(np.count_nonzero(mask_1))
-    count_2 = int(np.count_nonzero(mask_2))
-    total = count_1 + count_2
-
     block1_az = struct.unpack_from("<H", payload, _BLOCK1_AZ_OFFSET)[0]
     frame, should_buffer = assembler._begin_packet(block1_az)
     if not should_buffer:
         return frame
 
+    parts = _extract_spherical_packet_parts(payload)
+    total = parts.count_1 + parts.count_2
     out = assembler._reserve(total)
     if total == 0:
         return frame
 
     block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
-    if count_1 > 0:
+    if parts.count_1 > 0:
         _fill_spherical_block(
-            out[:count_1],
-            channels_1,
-            mask_1,
+            out[: parts.count_1],
+            parts.channels_1,
+            parts.mask_1,
             block1_az,
             calibration,
             t0 + block_start_us[0] * 1e-6,
         )
-    if count_2 > 0:
+    if parts.count_2 > 0:
         az_raw_2 = struct.unpack_from("<H", payload, _BLOCK2_AZ_OFFSET)[0]
         _fill_spherical_block(
-            out[count_1:],
-            channels_2,
-            mask_2,
+            out[parts.count_1 :],
+            parts.channels_2,
+            parts.mask_2,
             az_raw_2,
             calibration,
             t0 + block_start_us[1] * 1e-6,
