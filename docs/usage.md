@@ -171,6 +171,56 @@ for payload in udp_payloads:
 `to_cartesian(spherical, calibration)` accepts a complete spherical frame or any slice,
 mask, or subset of one.
 
+### Decode-Time Channel/Azimuth Filter
+
+Use `ChannelAzimuthFilter` with `Decoder(..., output_mode="spherical")` to suppress
+known low-value returns before frames reach downstream processing.
+
+```python
+from lidar2numpy import ChannelAzimuthFilter, Decoder, load_calibration
+
+calibration = load_calibration("angle_corrections.csv")
+point_filter = ChannelAzimuthFilter(
+    drop_channels=(12, 14),
+    drop_azimuth_ranges_by_channel={
+        37: ((15.0, 30.0), (350.0, 10.0)),
+    },
+)
+decoder = Decoder(
+    calibration,
+    output_mode="spherical",
+    point_filter=point_filter,
+    point_filter_mode="drop",
+)
+```
+
+Filter contract:
+
+| Topic | Details |
+| --- | --- |
+| Channels | 1-based, `1..128`, matching `SPHERICAL_DTYPE["channel"]`. |
+| Azimuth ranges | Calibrated degrees, half-open `[start, end)`. Wraparound ranges such as `(350.0, 10.0)` are allowed. |
+| Full-circle ranges | 360 degree spans such as `(0.0, 360.0)` normalize to channel-wide drops. |
+| Output | `SPHERICAL_DTYPE` fields and kept-point order are unchanged. |
+| Fast path | `point_filter=None` and empty filters do not allocate the prepared lookup table. |
+
+`point_filter_mode="shadow"` prepares the same lookup table and reports would-drop
+diagnostics without suppressing points:
+
+```python
+decoder = Decoder(
+    calibration,
+    output_mode="spherical",
+    point_filter=point_filter,
+    point_filter_mode="shadow",
+)
+```
+
+After each emitted frame, `decoder.last_filter_diagnostics()` returns
+`input_points`, `output_points`, `dropped_points`, and
+`dropped_points_by_channel`. Filtering is parser-side only; it reduces decoded
+points and downstream work, but it does not reduce UDP traffic from the LiDAR.
+
 ### Reading pcap Files
 
 `read_pcap_payloads()` is a minimal helper for standard pcap files containing Ethernet,
@@ -300,6 +350,39 @@ Notes:
 | Timestamp source | Point timestamps come from the LiDAR hardware clock decoded from the packet tail. |
 | Output fields | The Foxglove point buffer contains `x`, `y`, `z`, and `intensity`. Other `POINT_DTYPE` fields are not written to the MCAP point records. |
 | Empty captures | The script exits with status 1 if no complete frames are decoded. |
+
+### `scripts/benchmark_lidar_decode.py`
+
+Benchmarks packet feed timing for no-filter, shadow-filter, or drop-filter decode runs.
+
+```bash
+uv run scripts/benchmark_lidar_decode.py capture.pcap \
+    --calibration angle_corrections.csv \
+    --output-mode spherical \
+    --filter-config lidar_decode_filter.json \
+    --repeat 3 \
+    --json-out benchmark.json
+```
+
+Command line reference:
+
+```text
+uv run scripts/benchmark_lidar_decode.py [OPTIONS] PCAP
+```
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `PCAP` | Yes | Input pcap file path. `--pcap-path` is accepted as an alias. |
+| `--calibration CALIBRATION` | No | Per-unit angle correction CSV. Defaults to nominal calibration with a warning. |
+| `--output-mode {cartesian,spherical}` | No | Decoder output mode. Defaults to `spherical`. |
+| `--filter-config FILTER_JSON` | No | JSON file containing only the `lidar_decode_filter` object. |
+| `--config-path INTERSECTION_JSON` | No | Full config file containing `perception.lidar_decode_filter`. Mutually exclusive with `--filter-config`. |
+| `--filter-mode {off,shadow,drop}` | No | Override the loaded filter mode for benchmark comparison. |
+| `--max-packets N` | No | Limit the number of pcap payloads read. |
+| `--warmup-packets N` | No | Feed this many packets before timing/counting results. |
+| `--repeat N` | No | Repeat the run and report mean timing fields. |
+| `--json-out PATH` | No | Write JSON output to a file instead of stdout. |
+| `--include-dropped-by-channel` | No | Include per-channel drop counts in JSON output. |
 
 ## Common Patterns
 

@@ -22,11 +22,12 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 
 from .calibration import Calibration
+from .filters import PreparedChannelAzimuthFilter
 from .firing_times import FIRING_OFFSETS_S
 from .structs import (
     _TAIL_OFF_DATETIME,
@@ -80,6 +81,15 @@ class _SphericalPacketParts:
     mask_2: np.ndarray
     count_1: int
     count_2: int
+
+
+@dataclass
+class _SphericalFeedResult:
+    frame: np.ndarray | None
+    frame_emitted: bool
+    input_points: int
+    output_points: int
+    dropped_by_channel: np.ndarray
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -315,8 +325,12 @@ def _extract_spherical_packet_parts(payload: bytes) -> _SphericalPacketParts:
 
 
 def _feed_packet_spherical(
-    payload: bytes, calibration: Calibration, assembler: _SphericalFrameAssembler
-) -> np.ndarray | None:
+    payload: bytes,
+    calibration: Calibration,
+    assembler: _SphericalFrameAssembler,
+    prepared_filter: PreparedChannelAzimuthFilter | None = None,
+    point_filter_mode: Literal["drop", "shadow"] = "drop",
+) -> _SphericalFeedResult:
     """Decode one spherical packet directly into a frame assembler buffer."""
     _validate_payload(payload)
     return_mode, t0 = _parse_tail(payload)
@@ -324,15 +338,51 @@ def _feed_packet_spherical(
     block1_az = struct.unpack_from("<H", payload, _BLOCK1_AZ_OFFSET)[0]
     frame, should_buffer = assembler._begin_packet(block1_az)
     if not should_buffer:
-        return frame
+        return _spherical_feed_result(frame, frame is not None)
 
     parts = _extract_spherical_packet_parts(payload)
+    block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
+    if prepared_filter is None:
+        return _feed_unfiltered_spherical_packet(
+            frame,
+            parts,
+            block1_az,
+            payload,
+            calibration,
+            assembler,
+            t0,
+            block_start_us,
+        )
+
+    return _feed_filtered_spherical_packet(
+        frame,
+        parts,
+        block1_az,
+        payload,
+        calibration,
+        assembler,
+        prepared_filter,
+        point_filter_mode,
+        t0,
+        block_start_us,
+    )
+
+
+def _feed_unfiltered_spherical_packet(  # noqa: PLR0913
+    frame: np.ndarray | None,
+    parts: _SphericalPacketParts,
+    block1_az: int,
+    payload: bytes,
+    calibration: Calibration,
+    assembler: _SphericalFrameAssembler,
+    t0: float,
+    block_start_us: tuple[float, float],
+) -> _SphericalFeedResult:
     total = parts.count_1 + parts.count_2
     out = assembler._reserve(total)
     if total == 0:
-        return frame
+        return _spherical_feed_result(frame, frame is not None)
 
-    block_start_us = (BLOCK2_START_US, BLOCK2_START_US) if return_mode.is_dual else _BLOCK_START_US
     if parts.count_1 > 0:
         _fill_spherical_block(
             out[: parts.count_1],
@@ -352,7 +402,103 @@ def _feed_packet_spherical(
             calibration,
             t0 + block_start_us[1] * 1e-6,
         )
-    return frame
+    return _spherical_feed_result(
+        frame,
+        frame is not None,
+        input_points=total,
+        output_points=total,
+    )
+
+
+def _feed_filtered_spherical_packet(  # noqa: PLR0913
+    frame: np.ndarray | None,
+    parts: _SphericalPacketParts,
+    block1_az: int,
+    payload: bytes,
+    calibration: Calibration,
+    assembler: _SphericalFrameAssembler,
+    prepared_filter: PreparedChannelAzimuthFilter,
+    point_filter_mode: Literal["drop", "shadow"],
+    t0: float,
+    block_start_us: tuple[float, float],
+) -> _SphericalFeedResult:
+    block2_az = struct.unpack_from("<H", payload, _BLOCK2_AZ_OFFSET)[0]
+    keep_1, dropped_1 = _filter_block_mask(
+        parts.mask_1,
+        prepared_filter.drop_mask_for_raw_azimuth(block1_az),
+        point_filter_mode,
+    )
+    keep_2, dropped_2 = _filter_block_mask(
+        parts.mask_2,
+        prepared_filter.drop_mask_for_raw_azimuth(block2_az),
+        point_filter_mode,
+    )
+
+    count_1 = int(np.count_nonzero(keep_1))
+    count_2 = int(np.count_nonzero(keep_2))
+    total_output = count_1 + count_2
+    out = assembler._reserve(total_output)
+
+    if count_1 > 0:
+        _fill_spherical_block(
+            out[:count_1],
+            parts.channels_1,
+            keep_1,
+            block1_az,
+            calibration,
+            t0 + block_start_us[0] * 1e-6,
+        )
+    if count_2 > 0:
+        _fill_spherical_block(
+            out[count_1:],
+            parts.channels_2,
+            keep_2,
+            block2_az,
+            calibration,
+            t0 + block_start_us[1] * 1e-6,
+        )
+
+    dropped_by_channel = np.bincount(
+        np.concatenate((np.nonzero(dropped_1)[0], np.nonzero(dropped_2)[0])),
+        minlength=128,
+    )
+    return _spherical_feed_result(
+        frame,
+        frame is not None,
+        input_points=parts.count_1 + parts.count_2,
+        output_points=total_output,
+        dropped_by_channel=dropped_by_channel,
+    )
+
+
+def _filter_block_mask(
+    distance_valid: np.ndarray,
+    drop_mask: np.ndarray,
+    point_filter_mode: Literal["drop", "shadow"],
+) -> tuple[np.ndarray, np.ndarray]:
+    dropped = distance_valid & drop_mask
+    if point_filter_mode == "shadow":
+        return distance_valid, dropped
+    return distance_valid & ~drop_mask, dropped
+
+
+def _spherical_feed_result(
+    frame: np.ndarray | None,
+    frame_emitted: bool,
+    *,
+    input_points: int = 0,
+    output_points: int = 0,
+    dropped_by_channel: np.ndarray | None = None,
+) -> _SphericalFeedResult:
+    if dropped_by_channel is None:
+        dropped_by_channel = np.zeros(128, dtype=np.int64)
+    return _SphericalFeedResult(
+        frame=frame,
+        frame_emitted=frame_emitted,
+        input_points=input_points,
+        output_points=output_points,
+        dropped_by_channel=dropped_by_channel,
+    )
 
 
 def _fill_spherical_block(  # noqa: PLR0913
