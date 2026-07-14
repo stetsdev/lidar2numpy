@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from _packet_builder import build_packet
 
+from lidar2numpy import _decoder_backend as backend_module
 from lidar2numpy import default_calibration
 
 
@@ -43,7 +44,7 @@ def test_run_once_reports_raw_decoder_metrics() -> None:
         warmup_packets=0,
     )
 
-    assert result["backend"] == "python"
+    assert result["backend"] in {"python", "cython"}
     assert result["packets"] == 5
     assert result["frames"] == 1
     assert result["points"] == 6
@@ -54,8 +55,9 @@ def test_run_once_reports_raw_decoder_metrics() -> None:
     assert set(result["feed_latency_us"]) == {"p50", "p95", "p99"}
 
 
-def test_explicit_unavailable_backend_fails_clearly() -> None:
+def test_explicit_unavailable_backend_fails_clearly(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_benchmark_module()
+    monkeypatch.setattr(backend_module, "_load_compiled_feed", lambda: None)
 
     with pytest.raises(RuntimeError, match="cython backend is unavailable"):
         module.run_once(
@@ -89,7 +91,7 @@ def test_main_writes_machine_readable_repeated_results(
 
     result = json.loads(output_path.read_text(encoding="utf-8"))
     assert result["schema_version"] == 1
-    assert result["backend"] == "python"
+    assert result["backend"] in {"python", "cython"}
     assert result["packets_per_run"] == 5
     assert len(result["runs"]) == 2
     assert result["environment"]["python_version"]
