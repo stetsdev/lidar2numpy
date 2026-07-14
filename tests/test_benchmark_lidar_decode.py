@@ -104,8 +104,12 @@ def test_main_writes_machine_readable_repeated_results(
         (["capture.pcap", "--warmup-packets", "-1"], "--warmup-packets must be non-negative"),
     ],
 )
-def test_parse_args_rejects_invalid_values(argv: list[str], message: str) -> None:
+def test_parse_args_rejects_invalid_values(
+    argv: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
     module = _load_benchmark_module()
 
-    with pytest.raises(SystemExit, match=message):
+    with pytest.raises(SystemExit):
         module.parse_args(argv)
+
+    assert message in capsys.readouterr().err
