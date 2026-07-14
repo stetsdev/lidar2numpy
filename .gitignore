@@ -14,6 +14,7 @@ __pycache__/
 
 # C extensions
 *.so
+src/lidar2numpy/_decoder_core.c
 
 # Distribution / packaging
 .Python
