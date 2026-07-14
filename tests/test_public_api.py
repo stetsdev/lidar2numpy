@@ -42,6 +42,8 @@ class TestPublicImports:
             "default_calibration",
             "load_calibration",
             "decode_packet",
+            "decoder_backend",
+            "require_compiled_backend",
             "block1_azimuth",
             "FrameAssembler",
             "Decoder",
