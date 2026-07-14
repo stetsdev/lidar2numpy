@@ -57,7 +57,7 @@ def test_run_once_reports_raw_decoder_metrics() -> None:
 def test_explicit_unavailable_backend_fails_clearly() -> None:
     module = _load_benchmark_module()
 
-    with pytest.raises(ValueError, match="cython backend is unavailable"):
+    with pytest.raises(RuntimeError, match="cython backend is unavailable"):
         module.run_once(
             _payloads(),
             calibration=default_calibration(),
