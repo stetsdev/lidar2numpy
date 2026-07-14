@@ -93,6 +93,32 @@ for payload in read_pcap_payloads("capture.pcap"):
 `to_cartesian()` accepts any subset or slice of a spherical frame — it does
 not require a complete 360° rotation.
 
+### Decode-time channel/azimuth filtering
+
+In spherical mode, callers can suppress known low-value returns while packets
+are decoded. Rules use 1-based channel numbers and calibrated azimuth degrees.
+Shadow mode reports would-drop diagnostics without changing emitted frames.
+
+```python
+from lidar2numpy import ChannelAzimuthFilter, Decoder, load_calibration
+
+cal = load_calibration("angle_corrections.csv")
+point_filter = ChannelAzimuthFilter(
+    drop_channels=(12, 14),
+    drop_azimuth_ranges_by_channel={37: ((15.0, 30.0), (350.0, 10.0))},
+)
+decoder = Decoder(
+    cal,
+    output_mode="spherical",
+    point_filter=point_filter,
+    point_filter_mode="drop",  # or "shadow"
+)
+```
+
+`decoder.last_filter_diagnostics()` returns counts for the last emitted frame.
+This is parser-side suppression only; it does not change what the LiDAR sends
+over UDP.
+
 ## Output Contract
 
 Points with no return (raw distance = 0) are excluded from all output arrays.

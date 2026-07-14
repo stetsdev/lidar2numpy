@@ -17,8 +17,11 @@ import lidar2numpy
 from lidar2numpy import (
     POINT_DTYPE,
     Calibration,
+    ChannelAzimuthFilter,
+    ChannelAzimuthFilterDiagnostics,
     Decoder,
     FrameAssembler,
+    PreparedChannelAzimuthFilter,
     ReturnMode,
     block1_azimuth,
     decode_packet,
@@ -44,6 +47,9 @@ class TestPublicImports:
             "decode_packet",
             "block1_azimuth",
             "FrameAssembler",
+            "ChannelAzimuthFilter",
+            "PreparedChannelAzimuthFilter",
+            "ChannelAzimuthFilterDiagnostics",
             "Decoder",
         } - set(lidar2numpy.__all__)
         assert not missing, f"Missing from __all__: {missing}"
@@ -61,6 +67,26 @@ class TestPublicImports:
     def test_frame_assembler_importable(self) -> None:
         a = FrameAssembler()
         assert a is not None
+
+    def test_channel_azimuth_filter_symbols_importable(self) -> None:
+        spec = ChannelAzimuthFilter(drop_channels=(1,))
+        prepared = PreparedChannelAzimuthFilter.from_spec(spec, default_calibration())
+        diagnostics = ChannelAzimuthFilterDiagnostics(
+            mode="off",
+            enabled=False,
+            active=False,
+            spec_fingerprint=None,
+            calibration_fingerprint=None,
+            prepared_fingerprint=None,
+            input_points=0,
+            output_points=0,
+            dropped_points=0,
+            dropped_points_by_channel={},
+        )
+
+        assert spec.drop_channels == (1,)
+        assert prepared.drop_by_raw_azimuth_and_channel.shape == (36000, 128)
+        assert diagnostics.to_dict()["mode"] == "off"
 
 
 # ---------------------------------------------------------------------------

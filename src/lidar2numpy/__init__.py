@@ -7,6 +7,8 @@ Public API
     frames out.  Wraps calibration loading, decode_packet, and
     FrameAssembler into a single object.  Accepts an optional
     ``output_mode`` parameter: ``"cartesian"`` (default) or ``"spherical"``.
+    In spherical mode, accepts an optional ``point_filter`` for decode-time
+    channel/calibrated-azimuth suppression or shadow diagnostics.
 
 ``decode_packet(payload, calibration) -> np.ndarray``
     Decode one payload unconditionally into a POINT_DTYPE array.  For
@@ -23,6 +25,16 @@ Public API
 ``FrameAssembler``
     Stateful azimuth-rollover detector for callers that decode packets
     themselves and want to assemble frames manually.
+
+``ChannelAzimuthFilter``
+    Immutable public spec for channel-wide and per-channel calibrated-azimuth
+    drop rules.
+
+``PreparedChannelAzimuthFilter``
+    Calibration-compiled lookup table for tests, benchmarks, and diagnostics.
+
+``ChannelAzimuthFilterDiagnostics``
+    Per-frame point counts from the decoder's active filter or shadow filter.
 
 ``load_calibration(source) -> Calibration``
     Load a Hesai angle-correction CSV from a path or file-like object.
@@ -53,6 +65,11 @@ import numpy as np
 
 from .calibration import Calibration, default_calibration, load_calibration
 from .decoder import _feed_packet_spherical, block1_azimuth, decode_packet, to_cartesian
+from .filters import (
+    ChannelAzimuthFilter,
+    ChannelAzimuthFilterDiagnostics,
+    PreparedChannelAzimuthFilter,
+)
 from .frame_assembler import FrameAssembler
 from .pcap import read_pcap_payloads
 from .structs import POINT_DTYPE, SPHERICAL_DTYPE, ReturnMode
@@ -69,6 +86,9 @@ __all__ = [
     "read_pcap_payloads",
     "block1_azimuth",
     "FrameAssembler",
+    "ChannelAzimuthFilter",
+    "PreparedChannelAzimuthFilter",
+    "ChannelAzimuthFilterDiagnostics",
     "Decoder",
 ]
 
@@ -125,6 +145,8 @@ class Decoder:
         self,
         calibration: _CalSource = None,
         output_mode: Literal["cartesian", "spherical"] = "cartesian",
+        point_filter: ChannelAzimuthFilter | None = None,
+        point_filter_mode: Literal["drop", "shadow"] = "drop",
     ) -> None:
         if isinstance(calibration, Calibration):
             self._calibration = calibration
@@ -135,9 +157,27 @@ class Decoder:
 
         if output_mode not in ("cartesian", "spherical"):
             raise ValueError(f"output_mode must be 'cartesian' or 'spherical'; got {output_mode!r}")
+        if point_filter_mode not in ("drop", "shadow"):
+            raise ValueError(
+                f"point_filter_mode must be 'drop' or 'shadow'; got {point_filter_mode!r}"
+            )
+        if point_filter is None and point_filter_mode != "drop":
+            raise ValueError("point_filter_mode is valid only when point_filter is provided")
+        if point_filter is not None and output_mode != "spherical":
+            raise ValueError("point_filter is supported only with output_mode='spherical'")
         self._output_mode = output_mode
         frame_dtype = SPHERICAL_DTYPE if output_mode == "spherical" else POINT_DTYPE
         self._assembler = FrameAssembler(dtype=frame_dtype)
+        self._prepared_filter: PreparedChannelAzimuthFilter | None = None
+        self._point_filter_mode: Literal["drop", "shadow"] = point_filter_mode
+        if point_filter is not None and not point_filter.is_empty():
+            self._prepared_filter = PreparedChannelAzimuthFilter.from_spec(
+                point_filter, self._calibration
+            )
+        self._active_filter_input_points = 0
+        self._active_filter_output_points = 0
+        self._active_filter_dropped_by_channel = np.zeros(128, dtype=np.int64)
+        self._last_filter_diagnostics = self._off_filter_diagnostics()
 
     def feed(self, payload: bytes) -> np.ndarray | None:
         """Decode one payload and return a complete frame if one is ready.
@@ -158,7 +198,21 @@ class Decoder:
             rotation, or ``None`` if the current frame is still accumulating.
         """
         if self._output_mode == "spherical":
-            return _feed_packet_spherical(payload, self._calibration, self._assembler)
+            result = _feed_packet_spherical(
+                payload,
+                self._calibration,
+                self._assembler,
+                self._prepared_filter,
+                self._point_filter_mode,
+            )
+            if result.frame_emitted:
+                self._finish_filter_diagnostics()
+            self._add_filter_counts(
+                result.input_points,
+                result.output_points,
+                result.dropped_by_channel,
+            )
+            return result.frame
 
         points = decode_packet(payload, self._calibration)
         az = block1_azimuth(payload)
@@ -171,4 +225,65 @@ class Decoder:
         buffered (e.g. at end of a pcap replay). Returns ``None`` if
         the startup discard phase has not completed yet.
         """
-        return self._assembler.flush()
+        frame = self._assembler.flush()
+        if self._output_mode == "spherical" and frame is not None:
+            self._finish_filter_diagnostics()
+        return frame
+
+    def last_filter_diagnostics(self) -> ChannelAzimuthFilterDiagnostics:
+        """Return decode-filter diagnostics for the most recently emitted frame."""
+        return self._last_filter_diagnostics
+
+    def _add_filter_counts(
+        self,
+        input_points: int,
+        output_points: int,
+        dropped_by_channel: np.ndarray | None,
+    ) -> None:
+        if self._prepared_filter is None or dropped_by_channel is None:
+            return
+        self._active_filter_input_points += input_points
+        self._active_filter_output_points += output_points
+        self._active_filter_dropped_by_channel += dropped_by_channel
+
+    def _finish_filter_diagnostics(self) -> None:
+        if self._prepared_filter is None:
+            self._last_filter_diagnostics = self._off_filter_diagnostics()
+            return
+
+        dropped_by_channel = {
+            channel: int(count)
+            for channel, count in enumerate(self._active_filter_dropped_by_channel, start=1)
+            if count
+        }
+        dropped_points = int(np.sum(self._active_filter_dropped_by_channel))
+        self._last_filter_diagnostics = ChannelAzimuthFilterDiagnostics(
+            mode=self._point_filter_mode,
+            enabled=True,
+            active=True,
+            spec_fingerprint=self._prepared_filter.spec_fingerprint,
+            calibration_fingerprint=self._prepared_filter.calibration_fingerprint,
+            prepared_fingerprint=self._prepared_filter.fingerprint,
+            input_points=self._active_filter_input_points,
+            output_points=self._active_filter_output_points,
+            dropped_points=dropped_points,
+            dropped_points_by_channel=dropped_by_channel,
+        )
+        self._active_filter_input_points = 0
+        self._active_filter_output_points = 0
+        self._active_filter_dropped_by_channel = np.zeros(128, dtype=np.int64)
+
+    @staticmethod
+    def _off_filter_diagnostics() -> ChannelAzimuthFilterDiagnostics:
+        return ChannelAzimuthFilterDiagnostics(
+            mode="off",
+            enabled=False,
+            active=False,
+            spec_fingerprint=None,
+            calibration_fingerprint=None,
+            prepared_fingerprint=None,
+            input_points=0,
+            output_points=0,
+            dropped_points=0,
+            dropped_points_by_channel={},
+        )
