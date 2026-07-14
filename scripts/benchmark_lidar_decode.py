@@ -9,7 +9,7 @@ import platform
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from lidar2numpy import Decoder, default_calibration, load_calibration
 from lidar2numpy.calibration import Calibration
@@ -51,13 +51,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def _resolve_backend(requested: BackendRequest) -> Literal["python"]:
-    """Resolve a C1.1 backend request before the compiled backend exists."""
-    if requested == "cython":
-        raise ValueError("cython backend is unavailable in this build")
-    return "python"
-
-
 def _percentile(values: list[float], percentile: float) -> float:
     """Return a linear-interpolated percentile from a non-empty value list."""
     sorted_values = sorted(values)
@@ -86,11 +79,10 @@ def run_once(
     warmup_packets: int,
 ) -> dict[str, Any]:
     """Decode one packet sequence and return comparable aggregate metrics."""
-    resolved_backend = _resolve_backend(backend)
     if warmup_packets >= len(payloads):
         raise ValueError("warmup-packets must leave at least one timed packet")
 
-    decoder = Decoder(calibration, output_mode="spherical")
+    decoder = Decoder(calibration, output_mode="spherical", backend=backend)
     latencies_us: list[float] = []
     frames = 0
     points = 0
@@ -114,7 +106,7 @@ def run_once(
     thread_cpu_time_s = (time.thread_time_ns() - thread_start_ns) / 1_000_000_000.0
     packets = len(latencies_us)
     return {
-        "backend": resolved_backend,
+        "backend": decoder.backend,
         "packets": packets,
         "frames": frames,
         "points": points,
@@ -157,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"No 1100-byte JT128 payloads found in {args.pcap}")
 
     calibration = load_calibration(args.calibration) if args.calibration else default_calibration()
-    backend: BackendRequest = args.backend
+    backend = cast(BackendRequest, args.backend)
     runs = [
         run_once(
             payloads,

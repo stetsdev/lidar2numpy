@@ -40,6 +40,12 @@ Public API
 ``SPHERICAL_DTYPE``
     NumPy dtype of the spherical (polar) output structured array.
 
+``decoder_backend()``
+    Report whether automatic spherical decoding selects the Python or Cython backend.
+
+``require_compiled_backend()``
+    Raise when a production caller requires the compiled Cython backend.
+
 ``ReturnMode``
     IntEnum of return-mode codes in the JT128 tail byte.
 """
@@ -51,8 +57,14 @@ from typing import BinaryIO, Literal, Union
 
 import numpy as np
 
+from ._decoder_backend import (
+    BackendRequest,
+    decoder_backend,
+    require_compiled_backend,
+    resolve_spherical_backend,
+)
 from .calibration import Calibration, default_calibration, load_calibration
-from .decoder import _feed_packet_spherical, block1_azimuth, decode_packet, to_cartesian
+from .decoder import block1_azimuth, decode_packet, to_cartesian
 from .frame_assembler import FrameAssembler
 from .pcap import read_pcap_payloads
 from .structs import POINT_DTYPE, SPHERICAL_DTYPE, ReturnMode
@@ -65,6 +77,8 @@ __all__ = [
     "default_calibration",
     "load_calibration",
     "decode_packet",
+    "decoder_backend",
+    "require_compiled_backend",
     "to_cartesian",
     "read_pcap_payloads",
     "block1_azimuth",
@@ -95,6 +109,11 @@ class Decoder:
         ``"spherical"`` — frames are SPHERICAL_DTYPE arrays with channel,
         azimuth_deg, and distance_m fields. The trig XYZ step is skipped;
         call :func:`to_cartesian` on the result (or a subset) when needed.
+    backend:
+        ``"auto"`` (default) selects the compiled spherical decoder when it is
+        installed and otherwise uses Python. ``"python"`` forces the reference
+        implementation for development and tests. ``"cython"`` requires the
+        compiled decoder and raises if it is not available.
 
     Examples
     --------
@@ -125,6 +144,7 @@ class Decoder:
         self,
         calibration: _CalSource = None,
         output_mode: Literal["cartesian", "spherical"] = "cartesian",
+        backend: BackendRequest = "auto",
     ) -> None:
         if isinstance(calibration, Calibration):
             self._calibration = calibration
@@ -136,8 +156,14 @@ class Decoder:
         if output_mode not in ("cartesian", "spherical"):
             raise ValueError(f"output_mode must be 'cartesian' or 'spherical'; got {output_mode!r}")
         self._output_mode = output_mode
+        self._backend, self._spherical_feed = resolve_spherical_backend(backend)
         frame_dtype = SPHERICAL_DTYPE if output_mode == "spherical" else POINT_DTYPE
         self._assembler = FrameAssembler(dtype=frame_dtype)
+
+    @property
+    def backend(self) -> Literal["python", "cython"]:
+        """Name of the spherical backend selected for this decoder instance."""
+        return self._backend
 
     def feed(self, payload: bytes) -> np.ndarray | None:
         """Decode one payload and return a complete frame if one is ready.
@@ -158,7 +184,7 @@ class Decoder:
             rotation, or ``None`` if the current frame is still accumulating.
         """
         if self._output_mode == "spherical":
-            return _feed_packet_spherical(payload, self._calibration, self._assembler)
+            return self._spherical_feed(payload, self._calibration, self._assembler)
 
         points = decode_packet(payload, self._calibration)
         az = block1_azimuth(payload)
