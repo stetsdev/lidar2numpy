@@ -20,8 +20,9 @@ def _complete_frame(decoder: Decoder) -> np.ndarray:
     return frame
 
 
-def test_public_backend_identity_reports_python_without_extension() -> None:
-    assert lidar2numpy.decoder_backend() == "python"
+def test_auto_backend_uses_compiled_extension_when_installed() -> None:
+    assert lidar2numpy.decoder_backend() == "cython"
+    lidar2numpy.require_compiled_backend()
 
 
 def test_explicit_python_backend_matches_auto_output() -> None:
@@ -34,12 +35,20 @@ def test_explicit_python_backend_matches_auto_output() -> None:
     np.testing.assert_array_equal(python_frame, auto_frame)
 
 
-def test_explicit_cython_backend_fails_when_extension_is_absent() -> None:
+def test_explicit_cython_backend_fails_when_extension_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend_module, "_load_compiled_feed", lambda: None)
+
     with pytest.raises(RuntimeError, match="cython backend is unavailable"):
         Decoder(default_calibration(), output_mode="spherical", backend="cython")
 
 
-def test_production_guard_fails_when_only_python_backend_is_available() -> None:
+def test_production_guard_fails_when_only_python_backend_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(backend_module, "_load_compiled_feed", lambda: None)
+
     with pytest.raises(RuntimeError, match="compiled Cython decoder backend is required"):
         lidar2numpy.require_compiled_backend()
 
