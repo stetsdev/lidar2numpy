@@ -1,5 +1,5 @@
 # cython: language_level=3
-"""Compiled dense single-return implementation of the spherical decoder."""
+"""Compiled spherical decoder for dense, sparse, single-, and dual-return packets."""
 
 import numpy as np
 cimport numpy as cnp
@@ -7,6 +7,7 @@ from libc.string cimport memcpy
 
 from .decoder import _parse_tail, _validate_payload
 from .firing_times import FIRING_OFFSETS_S
+from .structs import BLOCK1_START_US, BLOCK2_START_US
 
 
 cdef int _BLOCK1_AZ_OFFSET = 12
@@ -14,6 +15,8 @@ cdef int _BLOCK1_CH_OFFSET = 14
 cdef int _BLOCK2_AZ_OFFSET = 526
 cdef int _BLOCK2_CH_OFFSET = 528
 cdef int _POINT_SIZE = 24
+cdef double _BLOCK1_START_S = BLOCK1_START_US / 1_000_000.0
+cdef double _BLOCK2_START_S = BLOCK2_START_US / 1_000_000.0
 
 
 cdef inline unsigned short _u16(const unsigned char[::1] payload, int offset):
@@ -131,11 +134,11 @@ def feed_packet_spherical(bytes payload, object calibration, object assembler):
     raw_out = raw_array
     block2_az = _u16(packet, _BLOCK2_AZ_OFFSET)
     if return_mode.is_dual:
-        block_1_start_s = t0 - 0.001888
-        block_2_start_s = t0 - 0.001888
+        block_1_start_s = t0 + _BLOCK2_START_S
+        block_2_start_s = t0 + _BLOCK2_START_S
     else:
-        block_1_start_s = t0 - 0.001999111
-        block_2_start_s = t0 - 0.001888
+        block_1_start_s = t0 + _BLOCK1_START_S
+        block_2_start_s = t0 + _BLOCK2_START_S
     _fill_block(
         raw_out,
         0,

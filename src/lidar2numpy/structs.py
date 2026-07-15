@@ -35,8 +35,7 @@ _TAIL_OFF_FRAC_SEC: int = 21
 
 # Single-return block start times (microseconds, relative to the packet's
 # tail timestamp t0). Block 1 fires 111.111 us before Block 2 in single
-# return; both blocks land at t0 - 1888 us in dual return (not yet
-# supported by Hesai, so only the single-return values are defined here).
+# return; both blocks land at t0 - 1888 us in dual return.
 BLOCK1_START_US: float = -1999.111
 BLOCK2_START_US: float = -1888.0
 

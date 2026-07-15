@@ -28,7 +28,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--backend",
         choices=("auto", "python", "cython"),
         default="auto",
-        help="Decoder backend to benchmark. Cython is added in a later sub-increment.",
+        help="Decoder backend to benchmark.",
     )
     parser.add_argument("--repeat", type=int, default=1, help="Number of complete benchmark runs.")
     parser.add_argument(

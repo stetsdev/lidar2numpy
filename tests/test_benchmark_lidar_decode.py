@@ -68,6 +68,19 @@ def test_explicit_unavailable_backend_fails_clearly(monkeypatch: pytest.MonkeyPa
         )
 
 
+def test_parse_args_describes_available_cython_backend(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_benchmark_module()
+
+    with pytest.raises(SystemExit):
+        module.parse_args(["capture.pcap", "--help"])
+
+    help_text = capsys.readouterr().out
+    assert "Decoder backend to benchmark." in help_text
+    assert "later sub-increment" not in help_text
+
+
 def test_main_writes_machine_readable_repeated_results(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

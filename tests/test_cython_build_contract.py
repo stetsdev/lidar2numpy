@@ -17,9 +17,17 @@ def test_build_configuration_declares_cython_and_numpy() -> None:
     requirements = build_system["requires"]
     assert any(requirement.lower().startswith("cython") for requirement in requirements)
     assert any(requirement.lower().startswith("numpy") for requirement in requirements)
+    assert "numpy>=2.0" in config["project"]["dependencies"]
 
 
 def test_compiled_decoder_source_and_build_entrypoint_exist() -> None:
     """The distribution contains an extension source and setuptools entrypoint."""
     assert (_ROOT / "setup.py").is_file()
     assert (_ROOT / "src" / "lidar2numpy" / "_decoder_core.pyx").is_file()
+
+
+def test_sdist_manifest_excludes_development_material() -> None:
+    manifest = (_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+
+    for directory in ("tests", "docs", "context"):
+        assert f"prune {directory}" in manifest
