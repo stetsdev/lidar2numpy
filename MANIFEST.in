@@ -1,0 +1,5 @@
+include src/lidar2numpy/_decoder_core.pyx
+exclude src/lidar2numpy/_decoder_core.c
+prune tests
+prune docs
+prune context

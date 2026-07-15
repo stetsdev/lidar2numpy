@@ -2,7 +2,9 @@
 
 ## Project Overview
 
-Pure-Python library that decodes raw Hesai JT128 LiDAR UDP packets into structured NumPy arrays. Forked from [MapIV/hydra4](https://github.com/MapIV/hydra4) (Pandar XT-32/OT-128 decoder for ROS). No ROS, no pypcd4, no C/C++. Consumed by the Intersection Monitor's `im-perception` process as the LiDAR ingest module.
+Python library that decodes raw Hesai JT128 LiDAR UDP packets into structured NumPy arrays. Forked from [MapIV/hydra4](https://github.com/MapIV/hydra4) (Pandar XT-32/OT-128 decoder for ROS). No ROS or pypcd4. Consumed by the Intersection Monitor's `im-perception` process as the LiDAR ingest module.
+
+The Cython decoder increment is an explicit exception to the historical no-native-code rule: a narrow Cython-generated extension may optimize the JT128 spherical decode hot path. Do not expand that exception into handwritten C/C++, unrelated native modules, or vendor SDK integration.
 
 **Tech stack:** Python 3.12, numpy (only runtime dependency).
 
@@ -22,7 +24,7 @@ uv run ruff format --check src/ tests/
 uv run pytest tests/ -x && uv run mypy src/ --strict && uv run ruff check src/ tests/
 ```
 
-Package management: `uv add` / `uv add --dev`. Never edit `pyproject.toml` dependency lists by hand.
+Package management: `uv add` / `uv add --dev`. Never edit managed project or development dependency lists by hand. PEP 517 `[build-system].requires` is a controlled packaging declaration because `uv add` does not manage it; document and test any change to it.
 
 ## Project Structure
 
@@ -151,13 +153,13 @@ Tests in `tests/`, fixtures in `tests/fixtures/`.
 
 ## What Not To Build
 
-- Any C or C++. Pure Python + numpy.
+- Handwritten C/C++ or native code outside the explicitly approved Cython decoder hot-path extension.
 - ROS messages or pypcd4 PointCloud objects. Output is NumPy structured arrays.
 - Point cloud processing (filtering, clustering, tracking). Downstream concern.
 - UDP socket management or pcap replay. Library decodes bytes; caller manages I/O.
 - Optical center offset correction (deferred; see jt128-packet-format.md).
 - Firing time angular correction (v0.1 — stationary ceiling mount; angular error negligible).
-- Dual return handling -- not implemented yet by Hesai
+- Changing the shipped dual-return decode behavior without focused single- and dual-return regression coverage.
 
 ## Key Constants
 
